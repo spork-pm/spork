@@ -37,7 +37,8 @@ spork hold jq              # pin a version (spork unhold jq to undo)
 spork doctor               # check PATH, folders, buckets
 ```
 
-Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `cache`, `hash`, …).
+Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `cache`, `hash`,
+`mirror`, …).
 `-f`/`--force` reinstalls, or lets spork replace an app or command it doesn't own.
 
 ## Layout
@@ -108,6 +109,32 @@ run), `.gz`, and plain binaries.
 
 Look at [bucket/](bucket/) for working examples (ripgrep, fd, jq, Rectangle).
 
+## Mirrors and proxies
+
+When a network blocks the original download sites, spork can rewrite URLs to go through an
+internal mirror or proxy (Artifactory, Nexus, a caching proxy, …). Each rule swaps a URL prefix:
+
+```bash
+spork mirror add https://github.com/ https://artifactory.example.com/artifactory/github/
+spork mirror add https://codeload.github.com/ https://artifactory.example.com/artifactory/codeload/
+spork mirror list
+spork mirror test https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-macos-arm64
+spork mirror rm https://codeload.github.com/
+```
+
+With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
+`https://artifactory.example.com/artifactory/github/jqlang/jq/releases/…`.
+
+- Rules apply to package downloads, manifest URLs, `spork hash`, bucket downloads and git
+  buckets (through git's `insteadOf`, so the bucket keeps its original URL).
+- When several rules match, the longest prefix wins.
+- Checksums still come from the manifest, so a mirror can't hand you a different file.
+- Rules live in `~/.spork/mirrors`, one `<from> <to>` per line (`#` starts a comment). Set
+  `SPORK_MIRRORS_FILE` to use a shared file instead, e.g. one your team maintains.
+- Buckets downloaded without git come from `codeload.github.com`, so mirror that host too.
+- If the replacement must contain the whole original URL, put it in the rule, e.g.
+  `spork mirror add https://github.com/ https://proxy.example.com/fetch/https://github.com/`.
+
 ## Limits
 
 - `.pkg` installers that need their scripts or must install to `/Library` won't work. Pick a
@@ -115,4 +142,5 @@ Look at [bucket/](bucket/) for working examples (ripgrep, fd, jq, Rectangle).
 - Apps that insist on living in `/Applications`, or that install privileged helpers or kernel/system
   extensions, need an admin.
 - Version checks compare strings: any change in a bucket's `version` counts as an update.
-- Downloads use `curl`, so corporate proxies work through `https_proxy` / `HTTPS_PROXY`.
+- Downloads use `curl`, so HTTP proxies work through `https_proxy` / `HTTPS_PROXY`. For
+  mirrors that need different URLs, see [Mirrors and proxies](#mirrors-and-proxies).
