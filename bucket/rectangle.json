@@ -1,0 +1,10 @@
+{
+    "version": "2.0.4",
+    "description": "Move and resize windows with keyboard shortcuts and snap areas",
+    "homepage": "https://rectangleapp.com",
+    "license": "MIT",
+    "url": "https://github.com/rxhanson/Rectangle/releases/download/v2.0.4/Rectangle2.0.4.dmg",
+    "hash": "sha256:9f820a2e56bd2c27cdda4fb4556de3cbcfcbac052d9eeb2179d49e2dae277abc",
+    "app": "Rectangle.app",
+    "notes": "Grant Rectangle Accessibility access in System Settings > Privacy & Security when it asks."
+}

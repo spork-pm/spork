@@ -1,0 +1,19 @@
+{
+    "version": "10.5.0",
+    "description": "A simple, fast and user-friendly alternative to find",
+    "homepage": "https://github.com/sharkdp/fd",
+    "license": "MIT",
+    "architecture": {
+        "arm64": {
+            "url": "https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-aarch64-apple-darwin.tar.gz",
+            "hash": "sha256:b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12",
+            "extract_dir": "fd-v10.5.0-aarch64-apple-darwin"
+        },
+        "x86_64": {
+            "url": "https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-x86_64-apple-darwin.tar.gz",
+            "hash": "sha256:7e31028c62c6955877735d0406807aa484c2a5e6f86235a59e26c29c301da590",
+            "extract_dir": "fd-v10.5.0-x86_64-apple-darwin"
+        }
+    },
+    "bin": "fd"
+}

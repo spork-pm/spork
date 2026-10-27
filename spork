@@ -1,0 +1,776 @@
+#!/bin/bash
+# spork - a Scoop-style package manager for macOS that never needs admin rights.
+#
+# GUI apps go to ~/Applications, command-line tools are linked into ~/.spork/bin
+# (add that to $PATH with: eval "$(spork shellenv)").
+#
+# Only uses tools that ship with macOS: bash 3.2, curl, plutil (reads JSON),
+# shasum, ditto, tar, hdiutil and pkgutil. git is optional.
+
+set -o pipefail
+
+SPORK_VERSION=0.1.0
+SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
+SPORK_APPDIR=${SPORK_APPDIR:-$HOME/Applications}
+BIN_DIR=$SPORK_HOME/bin
+APPS_DIR=$SPORK_HOME/apps
+BUCKETS_DIR=$SPORK_HOME/buckets
+CACHE_DIR=$SPORK_HOME/cache
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+# Real CPU architecture, even when this shell runs under Rosetta.
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then ARCH=arm64; else ARCH=x86_64; fi
+ARCH=${SPORK_ARCH:-$ARCH}
+
+FORCE=
+
+# ---------------------------------------------------------------- output
+
+if [ -t 1 ]; then
+  B=$'\033[1m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' C=$'\033[36m' D=$'\033[2m' N=$'\033[0m'
+else
+  B= G= Y= R= C= D= N=
+fi
+say()  { printf '%s==>%s %s\n' "$G$B" "$N" "$*"; }
+note() { printf '%s    %s%s\n' "$D" "$*" "$N"; }
+warn() { printf '%swarning:%s %s\n' "$Y" "$N" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- temp files
+
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/spork.XXXXXX") || die "cannot create a temp directory"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+cleanup() {
+  # Detach any disk image still mounted under our temp dir (e.g. after an error).
+  mount | awk -v r="$TMP_ROOT" 'index($3, r) == 1 { print $3 }' | while IFS= read -r m; do
+    hdiutil detach -force -quiet "$m" 2>/dev/null
+  done
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# ---------------------------------------------------------------- JSON (via plutil)
+
+jget()  { plutil -extract "$2" raw -o - "$1" 2>/dev/null; }
+jtype() { plutil -type "$2" "$1" 2>/dev/null; }
+jhas()  { plutil -type "$2" "$1" >/dev/null 2>&1; }
+
+# Print each item of a value that may be a string or an array of strings.
+jlist() {
+  local f=$1 k=$2 t n i=0
+  t=$(jtype "$f" "$k") || return 0
+  if [ "$t" = array ]; then
+    n=$(jget "$f" "$k")
+    while [ "$i" -lt "$n" ]; do jget "$f" "$k.$i"; i=$((i + 1)); done
+  else
+    jget "$f" "$k"
+  fi
+}
+
+# Choose which build of a manifest to use; sets M_ARCH.
+pick_arch() {
+  local f=$1
+  if jhas "$f" "architecture.$ARCH"; then M_ARCH=$ARCH
+  elif jhas "$f" url; then M_ARCH=universal
+  elif [ "$ARCH" = arm64 ] && jhas "$f" architecture.x86_64; then
+    M_ARCH=x86_64
+    warn "no Apple silicon build; using the Intel build (needs Rosetta 2)"
+  else
+    die "$(basename "$f" .json) is not available for $ARCH"
+  fi
+}
+
+# Key path for a manifest field, preferring the architecture-specific value.
+mkey() {
+  local f=$1 k=$2
+  if [ "$M_ARCH" != universal ] && jhas "$f" "architecture.$M_ARCH.$k"; then
+    echo "architecture.$M_ARCH.$k"
+  elif jhas "$f" "$k"; then
+    echo "$k"
+  else
+    return 1
+  fi
+}
+mget() { local k; k=$(mkey "$1" "$2") && jget "$1" "$k"; }
+
+# Print "path<TAB>alias" for each command a manifest exposes.
+# "bin" may be "path", ["path", ...] or [["path", "alias"], ...].
+bin_entries() {
+  local f=$1 k n i=0 p a
+  k=$(mkey "$f" bin) || return 0
+  if [ "$(jtype "$f" "$k")" != array ]; then
+    p=$(jget "$f" "$k"); printf '%s\t%s\n' "$p" "$(basename "$p")"; return 0
+  fi
+  n=$(jget "$f" "$k")
+  while [ "$i" -lt "$n" ]; do
+    if [ "$(jtype "$f" "$k.$i")" = array ]; then
+      p=$(jget "$f" "$k.$i.0"); a=$(jget "$f" "$k.$i.1")
+    else
+      p=$(jget "$f" "$k.$i"); a=$(basename "$p")
+    fi
+    printf '%s\t%s\n' "$p" "$a"
+    i=$((i + 1))
+  done
+}
+
+# ---------------------------------------------------------------- buckets & manifests
+
+manifest_dir() { if [ -d "$1/bucket" ]; then echo "$1/bucket"; else echo "$1"; fi; }
+
+list_buckets() {
+  [ -d "$BUCKETS_DIR/main" ] && echo main
+  local d b
+  for d in "$BUCKETS_DIR"/*; do
+    [ -d "$d" ] || continue
+    b=$(basename "$d"); [ "$b" = main ] || echo "$b"
+  done
+}
+
+# Find a manifest. Accepts "name", "bucket/name", a path to a .json file or a URL.
+# Sets M_NAME, M_FILE, M_BUCKET and M_SOURCE.
+resolve() {
+  local q=$1 b f
+  M_SOURCE= M_FILE=
+  case $q in
+    http://*|https://*)
+      M_NAME=$(basename "${q%%\?*}" .json); M_BUCKET=url; M_SOURCE=$q
+      M_FILE=$TMP_ROOT/manifest-$M_NAME.json
+      curl -fsSL "$q" -o "$M_FILE" || die "could not download manifest $q" ;;
+    *.json)
+      [ -f "$q" ] || die "no such file: $q"
+      M_NAME=$(basename "$q" .json); M_BUCKET=file
+      M_FILE=$(cd "$(dirname "$q")" && pwd)/$(basename "$q"); M_SOURCE=$M_FILE ;;
+    */*)
+      b=${q%%/*}; M_NAME=${q#*/}; M_BUCKET=$b
+      [ -d "$BUCKETS_DIR/$b" ] || die "no bucket named '$b' (see: spork bucket list)"
+      M_FILE=$(manifest_dir "$BUCKETS_DIR/$b")/$M_NAME.json
+      [ -f "$M_FILE" ] || die "no package '$M_NAME' in bucket '$b'" ;;
+    *)
+      M_NAME=$q
+      for b in $(list_buckets); do
+        f=$(manifest_dir "$BUCKETS_DIR/$b")/$q.json
+        if [ -f "$f" ]; then M_FILE=$f; M_BUCKET=$b; break; fi
+      done
+      [ -n "$M_FILE" ] || die "couldn't find package '$q' (try: spork search $q)" ;;
+  esac
+  plutil -convert json -o /dev/null "$M_FILE" 2>/dev/null || die "invalid JSON in $M_FILE"
+  jhas "$M_FILE" version || die "manifest has no \"version\": $M_FILE"
+}
+
+# ---------------------------------------------------------------- installed state
+
+installed_version() {
+  local l; l=$(readlink "$APPS_DIR/$1/current" 2>/dev/null) && echo "${l##*/}"
+}
+installed_list() {
+  local d
+  for d in "$APPS_DIR"/*; do [ -L "$d/current" ] && basename "$d"; done
+}
+receipt() { sed -n "s/^$2=//p" "$APPS_DIR/$1/current/.spork/info" 2>/dev/null; }
+
+# Which package owns a command name in $BIN_DIR / an app path in $SPORK_APPDIR.
+owner_of() {
+  local list=$1 item=$2 f
+  for f in "$APPS_DIR"/*/"$list"; do
+    [ -f "$f" ] && grep -qxF -- "$item" "$f" && { basename "$(dirname "$f")"; return 0; }
+  done
+  return 1
+}
+remove_app() {
+  [ -x "$LSREGISTER" ] && "$LSREGISTER" -u "$1" >/dev/null 2>&1
+  rm -rf "$1" && note "removed $1"
+}
+app_running() { pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- download, verify, extract
+
+fetch() {
+  local url=$1 out=$2 progress=-sS
+  if [ -f "$out" ]; then note "using cached $(basename "$out")"; return 0; fi
+  say "Downloading $url"
+  [ -t 2 ] && progress=--progress-bar
+  curl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$url" \
+    || { rm -f "$out.part"; die "download failed: $url"; }
+  mv "$out.part" "$out"
+}
+
+# Hashes are "sha256:<hex>", "sha512:<hex>", "sha1:<hex>" or bare hex (sha256).
+verify() {
+  local file=$1 want=$2 algo=256 got
+  case $want in sha1:*) algo=1;; sha512:*) algo=512;; esac
+  want=$(printf %s "${want#*:}" | tr 'A-F' 'a-f')
+  got=$(shasum -a "$algo" "$file" | awk '{ print $1 }')
+  if [ "$got" != "$want" ]; then
+    rm -f "$file"
+    die "hash check failed for $(basename "$file")
+    expected: $want
+    got:      $got"
+  fi
+  note "hash ok"
+}
+
+extract_dmg() {
+  local mnt=$TMP_ROOT/mnt-$RANDOM e
+  mkdir -p "$mnt"
+  # "echo Y" accepts the licence prompt some disk images show.
+  # macOS 27 deprecates "hdiutil attach" in favour of "diskutil image attach".
+  if diskutil image attach --help >/dev/null 2>&1; then
+    echo Y | diskutil image attach --readOnly --nobrowse --mountPoint "$mnt" "$1" >/dev/null || return 1
+  else
+    echo Y | hdiutil attach -nobrowse -readonly -noautoopen -noverify -mountpoint "$mnt" "$1" >/dev/null || return 1
+  fi
+  for e in "$mnt"/*; do
+    [ -L "$e" ] && continue          # e.g. the "Applications" shortcut
+    [ -e "$e" ] || continue
+    ditto "$e" "$2/$(basename "$e")" || { hdiutil detach -force -quiet "$mnt"; return 1; }
+  done
+  hdiutil detach -quiet "$mnt" || hdiutil detach -force -quiet "$mnt"
+}
+
+# Unpack a .pkg's payloads without running its installer scripts (no root needed).
+extract_pkg() {
+  local x=$TMP_ROOT/pkg-$RANDOM p
+  pkgutil --expand-full "$1" "$x" >/dev/null || return 1
+  while IFS= read -r p; do
+    ditto "$p" "$2" || return 1
+  done <<EOF
+$(find "$x" -type d -name Payload -prune)
+EOF
+}
+
+extract() {
+  local file=$1 dest=$2 name=$3 lc
+  lc=$(printf %s "$name" | tr '[:upper:]' '[:lower:]')
+  mkdir -p "$dest"
+  case $lc in
+    *.zip) ditto -x -k "$file" "$dest" ;;
+    *.tar|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tbz|*.tbz2|*.tar.zst) tar -xf "$file" -C "$dest" ;;
+    *.dmg) extract_dmg "$file" "$dest" ;;
+    *.pkg) extract_pkg "$file" "$dest" ;;
+    *.gz)  gunzip -c "$file" > "$dest/${name%.*}" && chmod +x "$dest/${name%.*}" ;;
+    *)     cp "$file" "$dest/$name" && chmod +x "$dest/$name" ;;   # a plain binary
+  esac || die "could not extract $name"
+}
+
+# Run an install/uninstall hook from the manifest. Hooks see $dir, $version,
+# $appdir, $bindir and $arch.
+run_hook() {
+  local f=$1 hook=$2 dir=$3 script
+  script=$(jlist "$f" "$hook")
+  [ -n "$script" ] || return 0
+  note "running $hook"
+  ( cd "$dir" && dir=$dir version=$(jget "$f" version) appdir=$SPORK_APPDIR bindir=$BIN_DIR arch=$M_ARCH \
+      bash -ec "export dir version appdir bindir arch; $script" ) || die "$hook failed"
+}
+
+# ---------------------------------------------------------------- linking
+
+unlink_bins() {
+  local pkgdir=$APPS_DIR/$1 a
+  [ -f "$pkgdir/.spork-bins" ] || return 0
+  while IFS= read -r a; do
+    [ -n "$a" ] && [ -L "$BIN_DIR/$a" ] && rm -f "$BIN_DIR/$a"
+  done < "$pkgdir/.spork-bins"
+  rm -f "$pkgdir/.spork-bins"
+}
+
+link_bins() {
+  local name=$1 f=$2 pkgdir=$APPS_DIR/$1 p a target owner
+  mkdir -p "$BIN_DIR"
+  : > "$pkgdir/.spork-bins"
+  while IFS=$'\t' read -r p a; do
+    [ -n "$p" ] || continue
+    if [ -e "$pkgdir/current/$p" ]; then
+      target=$pkgdir/current/$p                       # survives version updates
+    elif [ -e "$SPORK_APPDIR/$p" ]; then
+      target=$SPORK_APPDIR/$p                         # a tool inside an installed .app
+    else
+      warn "$name: command '$p' not found in package; skipping"; continue
+    fi
+    if [ "$a" = spork ]; then warn "refusing to replace the 'spork' command"; continue; fi
+    if [ -e "$BIN_DIR/$a" ] || [ -L "$BIN_DIR/$a" ]; then
+      owner=$(owner_of .spork-bins "$a")
+      if [ -z "$FORCE" ]; then
+        warn "skipping '$a': already provided by ${owner:-another file in $BIN_DIR} (use --force to take it over)"
+        continue
+      fi
+      rm -f "$BIN_DIR/$a"
+      [ -n "$owner" ] && sed -i '' "/^$a\$/d" "$APPS_DIR/$owner/.spork-bins"
+    fi
+    chmod +x "$target" 2>/dev/null
+    ln -s "$target" "$BIN_DIR/$a" && echo "$a" >> "$pkgdir/.spork-bins"
+    note "linked $a"
+  done <<EOF
+$(bin_entries "$f")
+EOF
+}
+
+# Move .app bundles into $SPORK_APPDIR; remove ones the previous version had
+# but the new one doesn't.
+install_apps() {
+  local name=$1 f=$2 dir=$3 pkgdir=$APPS_DIR/$1 entry target owner new old
+  new=$TMP_ROOT/apps-$name; : > "$new"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ -e "$dir/$entry" ] || die "$name: app '$entry' not found in package"
+    target=$SPORK_APPDIR/$(basename "$entry")
+    owner=$(owner_of .spork-apps "$target")
+    if [ -e "$target" ] && [ "$owner" != "$name" ] && [ -z "$FORCE" ]; then
+      if [ -n "$owner" ]; then die "$target belongs to the package '$owner'. Use --force to replace it."
+      else die "$target already exists and wasn't installed by spork. Use --force to replace it."; fi
+    fi
+    if [ -e "$target" ] && app_running "$target"; then
+      die "$(basename "$target") is running. Quit it, then try again."
+    fi
+    mkdir -p "$SPORK_APPDIR"
+    rm -rf "$target" && mv "$dir/$entry" "$target" || die "could not move $entry to $SPORK_APPDIR"
+    [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$target" >/dev/null 2>&1
+    echo "$target" >> "$new"
+    note "installed $target"
+  done <<EOF
+$(k=$(mkey "$f" app) && jlist "$f" "$k")
+EOF
+  if [ -f "$pkgdir/.spork-apps" ]; then
+    while IFS= read -r old; do
+      grep -qxF -- "$old" "$new" || remove_app "$old"
+    done < "$pkgdir/.spork-apps"
+  fi
+  mv "$new" "$pkgdir/.spork-apps"
+}
+
+# ---------------------------------------------------------------- install / uninstall
+
+do_install() {
+  resolve "$1"
+  local name=$M_NAME f=$M_FILE bucket=$M_BUCKET source=$M_SOURCE
+  local ver pkgdir cur dep i url dl fname cached ed src x dir n
+  local -a urls hashes
+  ver=$(jget "$f" version)
+  pkgdir=$APPS_DIR/$name
+  cur=$(installed_version "$name")
+
+  if [ "$cur" = "$ver" ] && [ -z "$FORCE" ]; then
+    say "$name $ver is already installed"; return 0
+  fi
+
+  for dep in $(jlist "$f" depends); do
+    [ -n "$(installed_version "${dep##*/}")" ] && continue
+    say "Installing dependency $dep"
+    ( FORCE= do_install "$dep" ) || die "could not install dependency $dep"
+  done
+
+  pick_arch "$f"
+  if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$bucket]$N"
+  else say "Installing $name $ver ${D}[$bucket, $M_ARCH]$N"; fi
+
+  n=0; while IFS= read -r url; do [ -n "$url" ] && urls[n]=$url && n=$((n + 1)); done <<EOF
+$(k=$(mkey "$f" url) && jlist "$f" "$k")
+EOF
+  [ "$n" -gt 0 ] || die "$name: manifest has no url"
+  i=0; while IFS= read -r url; do hashes[i]=$url; i=$((i + 1)); done <<EOF
+$(k=$(mkey "$f" hash) && jlist "$f" "$k")
+EOF
+
+  mkdir -p "$pkgdir" "$CACHE_DIR"
+  x=$TMP_ROOT/extract-$name; rm -rf "$x"; mkdir -p "$x"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    url=${urls[i]}; dl=${url%%#*}
+    case $url in
+      *'#/'*) fname=${url##*#/} ;;                      # "url#/name" renames the download
+      *)      fname=$(basename "${dl%%\?*}") ;;
+    esac
+    cached=$CACHE_DIR/$name#$ver#$fname
+    fetch "$dl" "$cached"
+    if [ -n "${hashes[i]}" ]; then verify "$cached" "${hashes[i]}"
+    else warn "manifest has no hash for $fname; it was not verified"; fi
+    extract "$cached" "$x" "$fname"
+    i=$((i + 1))
+  done
+
+  ed=$(mget "$f" extract_dir); src=$x
+  if [ -n "$ed" ]; then src=$x/$ed; [ -d "$src" ] || die "extract_dir '$ed' not found in the download"; fi
+  xattr -dr com.apple.quarantine "$src" 2>/dev/null
+
+  dir=$pkgdir/$ver
+  [ "$cur" = "$ver" ] && unlink_bins "$name"      # reinstalling the same version
+  rm -rf "$dir" && mv "$src" "$dir" || die "could not move files into $dir"
+
+  run_hook "$f" pre_install "$dir"
+  install_apps "$name" "$f" "$dir"
+  unlink_bins "$name"
+  ln -sfn "$ver" "$pkgdir/current"
+  link_bins "$name" "$f"
+
+  mkdir -p "$dir/.spork"
+  cp "$f" "$dir/.spork/manifest.json"
+  printf 'bucket=%s\nsource=%s\narch=%s\ninstalled=%s\n' \
+    "$bucket" "$source" "$M_ARCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/.spork/info"
+
+  run_hook "$f" post_install "$dir"
+
+  # Keep only the new version.
+  for old in "$pkgdir"/*; do
+    [ -d "$old" ] && [ ! -L "$old" ] && [ "$old" != "$dir" ] && rm -rf "$old"
+  done
+
+  say "${B}$name $ver$N installed"
+  local notes; notes=$(k=$(mkey "$f" notes) && jlist "$f" "$k")
+  [ -n "$notes" ] && printf '%sNotes:%s\n%s\n' "$C" "$N" "$(printf '%s\n' "$notes" | sed 's/^/    /')"
+  return 0
+}
+
+do_uninstall() {
+  local name=$1 pkgdir=$APPS_DIR/$1 a f
+  [ -d "$pkgdir" ] || die "$name is not installed"
+  if [ -f "$pkgdir/.spork-apps" ] && [ -z "$FORCE" ]; then
+    while IFS= read -r a; do
+      app_running "$a" && die "$(basename "$a") is running. Quit it, then try again."
+    done < "$pkgdir/.spork-apps"
+  fi
+  f=$pkgdir/current/.spork/manifest.json
+  if [ -f "$f" ]; then M_ARCH=$(receipt "$name" arch); run_hook "$f" pre_uninstall "$pkgdir/current"; fi
+  say "Uninstalling $name $(installed_version "$name")"
+  unlink_bins "$name"
+  if [ -f "$pkgdir/.spork-apps" ]; then
+    while IFS= read -r a; do [ -n "$a" ] && remove_app "$a"; done < "$pkgdir/.spork-apps"
+  fi
+  rm -rf "$pkgdir"
+  say "$name uninstalled"
+}
+
+# Where an installed package's manifest comes from now.
+source_of() {
+  local name=$1 src bucket
+  src=$(receipt "$name" source); bucket=$(receipt "$name" bucket)
+  if [ -n "$src" ]; then echo "$src"
+  elif [ -n "$bucket" ] && [ -d "$BUCKETS_DIR/$bucket" ]; then echo "$bucket/$name"
+  else echo "$name"; fi
+}
+
+# Print the latest available version, or nothing if it can't be found.
+latest_version() {
+  local q f
+  q=$(source_of "$1")
+  case $q in
+    http*) f=$TMP_ROOT/latest-$1.json; curl -fsSL "$q" -o "$f" 2>/dev/null || return 1 ;;
+    *.json) f=$q ;;
+    */*) f=$(manifest_dir "$BUCKETS_DIR/${q%%/*}")/$1.json ;;
+    *) for b in $(list_buckets); do f=$(manifest_dir "$BUCKETS_DIR/$b")/$1.json; [ -f "$f" ] && break; done ;;
+  esac
+  [ -f "$f" ] && jget "$f" version
+}
+
+# ---------------------------------------------------------------- bucket helpers
+
+has_git() {
+  local g; g=$(command -v git) || return 1
+  # /usr/bin/git is only a stub until the Command Line Tools are installed.
+  [ "$g" != /usr/bin/git ] || xcode-select -p >/dev/null 2>&1
+}
+
+# Turn a GitHub repo URL into a tarball URL, for machines without git.
+tarball_url() {
+  case $1 in
+    https://github.com/*)
+      local p=${1#https://github.com/}; p=${p%.git}; p=${p%/}
+      echo "https://codeload.github.com/$p/tar.gz/HEAD" ;;
+    *.tar.gz|*.tgz) echo "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+fetch_bucket_tarball() {
+  local url=$1 dest=$2 t tmp
+  t=$(tarball_url "$url") || die "git isn't available and '$url' isn't a GitHub or .tar.gz URL"
+  tmp=$TMP_ROOT/bucket-$RANDOM; mkdir -p "$tmp"
+  curl -fsSL "$t" | tar -xzf - -C "$tmp" --strip-components 1 || die "could not download bucket from $url"
+  rm -rf "$dest" && mv "$tmp" "$dest" && echo "$url" > "$dest/.spork-source"
+}
+
+bucket_kind() {
+  local d=$BUCKETS_DIR/$1
+  if [ -L "$d" ]; then echo "link -> $(readlink "$d")"
+  elif [ -d "$d/.git" ]; then echo "git $(git -C "$d" remote get-url origin 2>/dev/null)"
+  elif [ -f "$d/.spork-source" ]; then echo "download $(cat "$d/.spork-source")"
+  else echo local; fi
+}
+
+update_bucket() {
+  local b=$1 d=$BUCKETS_DIR/$1
+  if [ -L "$d" ]; then return 0
+  elif [ -d "$d/.git" ]; then
+    has_git || { warn "can't update '$b': git is not available"; return 0; }
+    note "updating bucket $b"; git -C "$d" pull --ff-only -q || warn "could not update bucket $b"
+  elif [ -f "$d/.spork-source" ]; then
+    note "updating bucket $b"; ( fetch_bucket_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update bucket $b"
+  fi
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_install() {
+  local q failed=0
+  [ $# -gt 0 ] || die "usage: spork install <package>..."
+  for q in "$@"; do ( do_install "$q" ) || failed=1; done
+  path_hint
+  return $failed
+}
+
+cmd_uninstall() {
+  local q failed=0
+  [ $# -gt 0 ] || die "usage: spork uninstall <package>..."
+  for q in "$@"; do ( do_uninstall "$q" ) || failed=1; done
+  return $failed
+}
+
+cmd_update() {
+  local name cur new failed=0 all=
+  if [ $# -eq 0 ]; then
+    say "Updating buckets"
+    for b in $(list_buckets); do update_bucket "$b"; done
+    cmd_status; return 0
+  fi
+  if [ "$1" = --all ] || [ "$1" = '*' ]; then all=1; set -- $(installed_list); fi
+  for name in "$@"; do
+    cur=$(installed_version "$name") || { warn "$name is not installed"; failed=1; continue; }
+    if [ -f "$APPS_DIR/$name/.hold" ]; then note "$name is held at $cur; skipping"; continue; fi
+    new=$(latest_version "$name")
+    if [ -z "$new" ]; then warn "$name: no manifest found any more"; continue; fi
+    if [ "$new" = "$cur" ] && [ -z "$FORCE" ]; then
+      [ -z "$all" ] && say "$name $cur is up to date"; continue
+    fi
+    ( do_install "$(source_of "$name")" ) || failed=1
+  done
+  [ -n "$all" ] && [ $failed -eq 0 ] && say "Everything is up to date"
+  return $failed
+}
+
+cmd_status() {
+  local name cur new outdated=0
+  for name in $(installed_list); do
+    cur=$(installed_version "$name"); new=$(latest_version "$name")
+    if [ -n "$new" ] && [ "$new" != "$cur" ]; then
+      [ $outdated -eq 0 ] && say "Updates available:"
+      printf '    %-24s %s -> %s%s\n' "$name" "$cur" "$G$new$N" "$([ -f "$APPS_DIR/$name/.hold" ] && echo " (held)")"
+      outdated=$((outdated + 1))
+    fi
+  done
+  if [ $outdated -eq 0 ]; then say "Everything is up to date"; else note "run 'spork update --all' to update"; fi
+}
+
+cmd_list() {
+  local name any=
+  for name in $(installed_list); do
+    [ -z "$any" ] && printf '%s%-24s %-16s %s%s\n' "$B" Name Version Bucket "$N" && any=1
+    printf '%-24s %-16s %s%s\n' "$name" "$(installed_version "$name")" "$(receipt "$name" bucket)" \
+      "$([ -f "$APPS_DIR/$name/.hold" ] && echo " (held)")"
+  done
+  [ -n "$any" ] || say "Nothing installed yet. Try: spork search"
+}
+
+cmd_search() {
+  local q=$1 b d f name hits found=
+  for b in $(list_buckets); do
+    d=$(manifest_dir "$BUCKETS_DIR/$b")
+    # Match on file name first, then on file contents (cheap), then read only the hits.
+    if [ -n "$q" ]; then
+      hits=$( { ls "$d" | grep '\.json$' | sed 's/\.json$//' | grep -i -- "$q" | sed "s|.*|$d/&.json|"
+                grep -il -- "\"description\".*$q" "$d"/*.json 2>/dev/null; } | sort -u)
+    else
+      hits=$(ls "$d"/*.json 2>/dev/null)
+    fi
+    [ -n "$hits" ] || continue
+    printf '%s%s bucket:%s\n' "$C" "$b" "$N"; found=1
+    while IFS= read -r f; do
+      name=$(basename "$f" .json)
+      printf '    %s%-22s%s %-12s %s\n' "$B" "$name" "$N" "$(jget "$f" version)" "$(jget "$f" description)"
+    done <<EOF
+$hits
+EOF
+  done
+  [ -n "$found" ] || say "No packages found${q:+ matching '$q'}"
+}
+
+cmd_info() {
+  [ $# -eq 1 ] || die "usage: spork info <package>"
+  resolve "$1"
+  local f=$M_FILE cur v
+  if jhas "$f" "architecture.$ARCH"; then M_ARCH=$ARCH; else M_ARCH=universal; fi
+  printf '%sName:%s        %s\n' "$B" "$N" "$M_NAME"
+  for v in description version homepage license; do
+    jhas "$f" "$v" && printf '%s%-12s%s %s\n' "$B" "$(echo "$v" | awk '{print toupper(substr($0,1,1)) substr($0,2)}'):" "$N" "$(jget "$f" "$v")"
+  done
+  printf '%sBucket:%s      %s\n' "$B" "$N" "$M_BUCKET"
+  cur=$(installed_version "$M_NAME")
+  printf '%sInstalled:%s   %s\n' "$B" "$N" "${cur:-no}"
+  v=$(bin_entries "$f" | cut -f2 | tr '\n' ' '); [ -n "${v% }" ] && printf '%sCommands:%s    %s\n' "$B" "$N" "$v"
+  v=$(k=$(mkey "$f" app) && jlist "$f" "$k" | tr '\n' ' '); [ -n "${v% }" ] && printf '%sApps:%s        %s\n' "$B" "$N" "$v"
+  v=$(jlist "$f" depends | tr '\n' ' '); [ -n "${v% }" ] && printf '%sDepends:%s     %s\n' "$B" "$N" "$v"
+  return 0
+}
+
+cmd_bucket() {
+  local sub=$1; shift
+  case $sub in
+    add)
+      local name=$1 url=$2 d
+      [ -n "$name" ] && [ -n "$url" ] || die "usage: spork bucket add <name> <git-url | github-url | directory>"
+      d=$BUCKETS_DIR/$name
+      [ -e "$d" ] && die "bucket '$name' already exists"
+      mkdir -p "$BUCKETS_DIR"
+      if [ -d "$url" ]; then
+        ln -s "$(cd "$url" && pwd)" "$d"
+      elif has_git; then
+        git clone -q --depth 1 "$url" "$d" || die "could not clone $url"
+      else
+        fetch_bucket_tarball "$url" "$d"
+      fi
+      say "Added bucket '$name' ($(ls "$(manifest_dir "$d")"/*.json 2>/dev/null | wc -l | tr -d ' ') packages)" ;;
+    rm|remove)
+      [ -n "$1" ] || die "usage: spork bucket rm <name>"
+      [ -e "$BUCKETS_DIR/$1" ] || die "no bucket named '$1'"
+      rm -rf "$BUCKETS_DIR/$1"; say "Removed bucket '$1'" ;;
+    list|ls|'')
+      local b
+      for b in $(list_buckets); do
+        printf '%s%-12s%s %4s packages  %s%s%s\n' "$B" "$b" "$N" \
+          "$(ls "$(manifest_dir "$BUCKETS_DIR/$b")"/*.json 2>/dev/null | wc -l | tr -d ' ')" "$D" "$(bucket_kind "$b")" "$N"
+      done ;;
+    update)
+      local b; for b in ${@:-$(list_buckets)}; do update_bucket "$b"; done ;;
+    *) die "usage: spork bucket [add|rm|list|update]" ;;
+  esac
+}
+
+cmd_cache() {
+  case $1 in
+    rm|clear)
+      if [ "$2" = --all ] || [ -z "$2" ]; then rm -rf "$CACHE_DIR"; say "Cache cleared"
+      else rm -f "$CACHE_DIR/$2#"*; say "Removed cached downloads of $2"; fi ;;
+    show|'')
+      [ -d "$CACHE_DIR" ] && [ -n "$(ls "$CACHE_DIR")" ] || { say "Cache is empty"; return 0; }
+      ls "$CACHE_DIR" | sed 's/^/    /'
+      say "Total: $(du -sh "$CACHE_DIR" | cut -f1)  (spork cache rm [package] to clear)" ;;
+    *) die "usage: spork cache [show|rm [package]]" ;;
+  esac
+}
+
+cmd_hold() {
+  local n; for n in "$@"; do
+    [ -d "$APPS_DIR/$n" ] || die "$n is not installed"
+    if [ "$HOLD" = 1 ]; then touch "$APPS_DIR/$n/.hold"; say "$n will not be updated"
+    else rm -f "$APPS_DIR/$n/.hold"; say "$n can be updated again"; fi
+  done
+}
+
+cmd_hash() {
+  [ -n "$1" ] || die "usage: spork hash <file | url>"
+  local f=$1
+  case $1 in http*) f=$TMP_ROOT/hash-download; curl -fL --progress-bar -o "$f" "$1" || die "download failed";; esac
+  echo "sha256:$(shasum -a 256 "$f" | awk '{ print $1 }')"
+}
+
+cmd_which() {
+  [ -n "$1" ] || die "usage: spork which <command>"
+  local l=$BIN_DIR/$1 o
+  [ -L "$l" ] || die "'$1' is not a spork command"
+  o=$(owner_of .spork-bins "$1")
+  echo "$(readlink "$l")${o:+  ($o)}"
+}
+
+cmd_shellenv() {
+  case ${SHELL##*/} in
+    fish) echo "fish_add_path -g \"$BIN_DIR\"" ;;
+    *)    echo "export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  esac
+}
+
+path_hint() {
+  case ":$PATH:" in *":$BIN_DIR:"*) ;; *)
+    warn "$BIN_DIR is not on your PATH. Add this line to ~/.zshrc:
+    eval \"\$($BIN_DIR/spork shellenv)\"" ;;
+  esac
+}
+
+cmd_doctor() {
+  local ok=1
+  case ":$PATH:" in *":$BIN_DIR:"*) say "PATH includes $BIN_DIR" ;; *) ok=; path_hint ;; esac
+  if mkdir -p "$SPORK_APPDIR" 2>/dev/null && [ -w "$SPORK_APPDIR" ]; then say "$SPORK_APPDIR is writable"
+  else ok=; warn "$SPORK_APPDIR is not writable"; fi
+  if [ -n "$(list_buckets)" ]; then say "Buckets: $(list_buckets | tr '\n' ' ')"
+  else ok=; warn "no buckets. Add one with: spork bucket add <name> <url>"; fi
+  if has_git; then say "git is available"
+  else note "git not found: buckets will be downloaded as archives (GitHub only)"; fi
+  [ "$ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd && note "Rosetta 2 is not running; Intel-only packages won't start"
+  [ -n "$ok" ] && say "All good"
+}
+
+usage() {
+  cat <<EOF
+${B}spork $SPORK_VERSION${N} - install apps and tools on macOS without admin rights
+
+${B}Usage:${N} spork <command> [options] [args]
+
+  install <pkg>...      Install packages (name, bucket/name, ./file.json or URL)
+  uninstall <pkg>...    Remove packages and their apps/commands
+  update                Update buckets, then show available updates
+  update <pkg>...       Update packages (--all for everything)
+  status                Show packages with updates available
+  list                  List installed packages
+  search [query]        Search buckets
+  info <pkg>            Show package details
+  cat <pkg>             Print a package's manifest
+  home <pkg>            Open a package's homepage
+  prefix <pkg>          Print a package's install directory
+  which <command>       Show where a command comes from
+  hold | unhold <pkg>   Stop / allow updates for a package
+  bucket add <name> <url|dir> | rm <name> | list | update
+  cache [show | rm [pkg]]
+  hash <file|url>       Print a sha256 for writing manifests
+  shellenv              Print the line that adds spork to PATH
+  doctor                Check your setup
+
+${B}Options:${N} -f, --force   reinstall, or replace files spork doesn't own
+
+Apps go to $SPORK_APPDIR, commands to $BIN_DIR.
+EOF
+}
+
+# ---------------------------------------------------------------- main
+
+args=()
+for a in "$@"; do
+  case $a in
+    -f|--force) FORCE=1 ;;
+    -h|--help) [ ${#args[@]} -eq 0 ] && { usage; exit 0; }; args+=("$a") ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]}"
+
+cmd=$1; [ $# -gt 0 ] && shift
+case $cmd in
+  install|i)      cmd_install "$@" ;;
+  uninstall|rm|remove) cmd_uninstall "$@" ;;
+  update|up|upgrade) cmd_update "$@" ;;
+  status)         cmd_status ;;
+  list|ls)        cmd_list ;;
+  search|s)       cmd_search "$1" ;;
+  info)           cmd_info "$@" ;;
+  cat)            resolve "$1"; cat "$M_FILE" ;;
+  home)           resolve "$1"; open "$(jget "$M_FILE" homepage)" ;;
+  prefix)         [ -n "$(installed_version "$1")" ] || die "$1 is not installed"; echo "$APPS_DIR/$1/current" ;;
+  which)          cmd_which "$1" ;;
+  hold)           HOLD=1 cmd_hold "$@" ;;
+  unhold)         HOLD=0 cmd_hold "$@" ;;
+  bucket)         cmd_bucket "$@" ;;
+  cache)          cmd_cache "$@" ;;
+  hash)           cmd_hash "$1" ;;
+  shellenv)       cmd_shellenv ;;
+  doctor)         cmd_doctor ;;
+  version|--version|-v) echo "spork $SPORK_VERSION" ;;
+  help|'')        usage ;;
+  *)              die "unknown command '$cmd' (see: spork help)" ;;
+esac

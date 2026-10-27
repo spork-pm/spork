@@ -1,0 +1,18 @@
+{
+    "version": "0.46.0",
+    "description": "A Kubernetes web UI that is fully-featured, user-friendly and extensible",
+    "homepage": "https://headlamp.dev",
+    "license": "Apache-2.0",
+    "architecture": {
+        "arm64": {
+            "url": "https://github.com/kubernetes-sigs/headlamp/releases/download/v0.46.0/Headlamp-0.46.0-mac-arm64.dmg",
+            "hash": "sha256:20294a2f1e92aa98c2a90aa0717b6b8e730ed55a0300c03db18c2f779ed7b564"
+        },
+        "x86_64": {
+            "url": "https://github.com/kubernetes-sigs/headlamp/releases/download/v0.46.0/Headlamp-0.46.0-mac-x64.dmg",
+            "hash": "sha256:946c72185732295fefe48e52efdb210a029eaa3fc443813bc8cbbb81b05f87ac"
+        }
+    },
+    "app": "Headlamp.app",
+    "notes": "Headlamp reads your clusters from ~/.kube/config (or $KUBECONFIG)."
+}
