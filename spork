@@ -16,6 +16,7 @@ BIN_DIR=$SPORK_HOME/bin
 APPS_DIR=$SPORK_HOME/apps
 DRAWERS_DIR=$SPORK_HOME/drawers
 CACHE_DIR=$SPORK_HOME/cache
+PERSIST_DIR=$SPORK_HOME/persist
 MIRRORS_FILE=${SPORK_MIRRORS_FILE:-$SPORK_HOME/mirrors}
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
@@ -24,6 +25,7 @@ if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then ARCH=arm64; else A
 ARCH=${SPORK_ARCH:-$ARCH}
 
 FORCE=
+PURGE=
 
 # ---------------------------------------------------------------- output
 
@@ -388,6 +390,64 @@ EOF
   mv "$new" "$pkgdir/.spork-apps"
 }
 
+# ---------------------------------------------------------------- persisted user data
+
+# Print "path<TAB>name" for each persist entry. "persist" may be "path",
+# ["path", ...] or [["path", "name"], ...]; the name defaults to the path.
+persist_entries() {
+  local f=$1 k n i=0 p t
+  k=$(mkey "$f" persist) || return 0
+  if [ "$(jtype "$f" "$k")" != array ]; then
+    p=$(jget "$f" "$k"); printf '%s\t%s\n' "$p" "$p"; return 0
+  fi
+  n=$(jget "$f" "$k")
+  while [ "$i" -lt "$n" ]; do
+    if [ "$(jtype "$f" "$k.$i")" = array ]; then
+      p=$(jget "$f" "$k.$i.0"); t=$(jget "$f" "$k.$i.1")
+    else
+      p=$(jget "$f" "$k.$i"); t=$p
+    fi
+    printf '%s\t%s\n' "$p" "$t"
+    i=$((i + 1))
+  done
+}
+
+# Persist paths must stay inside the package and outside .app bundles, which
+# are moved to ~/Applications and must not be modified.
+check_persist_path() {
+  case "/$1/" in
+    //|*/../*|*/./*) die "persist path '$1' must be a plain path inside the package" ;;
+  esac
+  case $1 in
+    /*) die "persist path '$1' must be relative to the package folder" ;;
+    *.app|*.app/*) die "persist path '$1' is inside an app bundle; apps keep their data in ~/Library" ;;
+  esac
+}
+
+# Replace each persisted path in the package with a link to the user's copy in
+# $PERSIST_DIR/<pkg>/. The first install moves the shipped file or folder there
+# (or creates an empty folder); later installs keep the user's copy.
+link_persist() {
+  local name=$1 f=$2 dir=$3 p t src keep
+  while IFS=$'\t' read -r p t; do
+    p=${p%/}; t=${t%/}
+    [ -n "$p" ] || continue
+    check_persist_path "$p"; check_persist_path "$t"
+    src=$dir/$p; keep=$PERSIST_DIR/$name/$t
+    if [ -e "$keep" ] || [ -L "$keep" ]; then
+      rm -rf "$src"
+    elif [ -e "$src" ]; then
+      mkdir -p "$(dirname "$keep")" && mv "$src" "$keep" || die "could not move $p to $keep"
+    else
+      mkdir -p "$keep" || die "could not create $keep"
+    fi
+    mkdir -p "$(dirname "$src")" && ln -s "$keep" "$src" || die "could not link $p to $keep"
+    note "persisted $p"
+  done <<EOF
+$(persist_entries "$f")
+EOF
+}
+
 # ---------------------------------------------------------------- install / uninstall
 
 do_install() {
@@ -410,6 +470,12 @@ do_install() {
   done
 
   pick_arch "$f"
+  local p t
+  while IFS=$'\t' read -r p t; do                  # catch bad paths before downloading
+    [ -n "$p" ] && check_persist_path "${p%/}" && check_persist_path "${t%/}"
+  done <<EOF
+$(persist_entries "$f")
+EOF
   if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$drawer]$N"
   else say "Installing $name $ver ${D}[$drawer, $M_ARCH]$N"; fi
 
@@ -447,6 +513,7 @@ EOF
   rm -rf "$dir" && mv "$src" "$dir" || die "could not move files into $dir"
 
   run_hook "$f" pre_install "$dir"
+  link_persist "$name" "$f" "$dir"
   install_apps "$name" "$f" "$dir"
   unlink_bins "$name"
   ln -sfn "$ver" "$pkgdir/current"
@@ -472,7 +539,13 @@ EOF
 
 do_uninstall() {
   local name=$1 pkgdir=$APPS_DIR/$1 a f
-  [ -d "$pkgdir" ] || die "$name is not installed"
+  if [ ! -d "$pkgdir" ]; then
+    # --purge also clears data left behind by an earlier uninstall.
+    if [ -n "$PURGE" ] && [ -d "$PERSIST_DIR/$name" ]; then
+      rm -rf "$PERSIST_DIR/$name"; say "Deleted saved data of $name"; return 0
+    fi
+    die "$name is not installed"
+  fi
   if [ -f "$pkgdir/.spork-apps" ] && [ -z "$FORCE" ]; then
     while IFS= read -r a; do
       app_running "$a" && die "$(basename "$a") is running. Quit it, then try again."
@@ -486,6 +559,10 @@ do_uninstall() {
     while IFS= read -r a; do [ -n "$a" ] && remove_app "$a"; done < "$pkgdir/.spork-apps"
   fi
   rm -rf "$pkgdir"
+  if [ -d "$PERSIST_DIR/$name" ]; then
+    if [ -n "$PURGE" ]; then rm -rf "$PERSIST_DIR/$name"; note "deleted saved data in $PERSIST_DIR/$name"
+    else note "kept your data in $PERSIST_DIR/$name (spork uninstall --purge $name deletes it)"; fi
+  fi
   say "$name uninstalled"
 }
 
@@ -665,6 +742,7 @@ cmd_info() {
   v=$(bin_entries "$f" | cut -f2 | tr '\n' ' '); [ -n "${v% }" ] && printf '%sCommands:%s    %s\n' "$B" "$N" "$v"
   v=$(k=$(mkey "$f" app) && jlist "$f" "$k" | tr '\n' ' '); [ -n "${v% }" ] && printf '%sApps:%s        %s\n' "$B" "$N" "$v"
   v=$(jlist "$f" depends | tr '\n' ' '); [ -n "${v% }" ] && printf '%sDepends:%s     %s\n' "$B" "$N" "$v"
+  [ -d "$PERSIST_DIR/$M_NAME" ] && printf '%sSaved data:%s  %s\n' "$B" "$N" "$PERSIST_DIR/$M_NAME"
   return 0
 }
 
@@ -813,7 +891,8 @@ ${B}spork $SPORK_VERSION${N} - install apps and tools on macOS without admin rig
 ${B}Usage:${N} spork <command> [options] [args]
 
   install <pkg>...      Install packages (name, drawer/name, ./file.json or URL)
-  uninstall <pkg>...    Remove packages and their apps/commands
+  uninstall <pkg>...    Remove packages and their apps/commands (--purge also
+                        deletes their saved data)
   update                Update drawers, then show available updates
   update <pkg>...       Update packages (--all for everything)
   status                Show packages with updates available
@@ -845,6 +924,7 @@ args=()
 for a in "$@"; do
   case $a in
     -f|--force) FORCE=1 ;;
+    --purge) PURGE=1 ;;
     -h|--help) [ ${#args[@]} -eq 0 ] && { usage; exit 0; }; args+=("$a") ;;
     *) args+=("$a") ;;
   esac

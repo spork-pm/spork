@@ -34,6 +34,7 @@ spork list                 # what's installed
 spork update               # refresh drawers, show what's outdated
 spork update --all         # update everything
 spork uninstall rectangle
+spork uninstall --purge mytool  # also delete the tool's saved data (see "persist" below)
 spork hold jq              # pin a version (spork unhold jq to undo)
 spork doctor               # check PATH, folders, drawers
 ```
@@ -50,6 +51,7 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
   apps/<pkg>/<version>/   # unpacked package files
   apps/<pkg>/current      # symlink to the installed version
   drawers/<name>/         # manifest collections
+  persist/<pkg>/          # user data kept across updates and uninstalls
   cache/                  # downloads, reused on reinstall
 ~/Applications/           # .app bundles
 ```
@@ -95,6 +97,7 @@ You can also install straight from a manifest: `spork install ./foo.json` or
     "bin": ["foo", ["bin/foo-cli", "foo2"]],
     "app": "Foo.app",
     "depends": ["bar"],
+    "persist": ["data", ["conf/settings.ini", "settings.ini"]],
     "pre_install": "…shell…",
     "post_install": ["…shell…", "…"],
     "pre_uninstall": "…shell…",
@@ -111,6 +114,7 @@ You can also install straight from a manifest: `spork install ./foo.json` or
 | `bin` | Commands to link into `~/.spork/bin`: `"path"`, or a list of `"path"` / `["path", "alias"]`. A path can point inside an installed app, e.g. `["Foo.app/Contents/Resources/foo", "foo"]`. |
 | `app` | `.app` bundle(s) to move into `~/Applications`. |
 | `depends` | Packages to install first. |
+| `persist` | Files or folders inside the package that hold user data: `"path"`, or a list of `"path"` / `["path", "name"]`. See [Persisted data](#persisted-data). |
 | hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$bindir`, `$arch` set. |
 
 Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.zst`, `.dmg`
@@ -119,6 +123,30 @@ run), `.gz`, and plain binaries.
 
 Look at the [main](https://github.com/spork-pm/main/tree/main/drawer) and
 [apps](https://github.com/spork-pm/apps/tree/main/drawer) drawers for working examples.
+
+## Persisted data
+
+Each update installs a package into a fresh folder and deletes the old one. A tool that keeps
+user files next to its binary (config, a database, plugins) would lose them, so list those paths
+under `persist`:
+
+```json
+"persist": ["data", ["conf/settings.ini", "settings.ini"]]
+```
+
+Each path is moved to `~/.spork/persist/<pkg>/` (under `name` when given) and replaced by a link
+in the package folder:
+
+- **First install:** the file or folder that ships in the package becomes the user's copy. If
+  nothing ships at that path, an empty folder is created. To start with an empty file instead,
+  create it in `pre_install`.
+- **Updates and reinstalls:** the user's copy replaces whatever the new version ships at that
+  path. Defaults added in a new version don't appear inside a persisted folder.
+- **Uninstall:** the data is kept, so reinstalling picks it up again. `spork uninstall --purge <pkg>`
+  deletes it, including data left behind by an earlier uninstall.
+
+Paths are relative to the package folder (after `extract_dir`). Paths inside an `.app` bundle
+aren't allowed: apps keep their data in `~/Library`, and changing a bundle breaks its signature.
 
 ## Mirrors and proxies
 
