@@ -9,6 +9,10 @@
 
 set -o pipefail
 
+# sysctl, pkgutil, diskutil and mount live in /usr/sbin and /sbin, which a
+# minimal PATH may lack. Append them so the user's own tools still come first.
+PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin
+
 SPORK_VERSION=0.1.0
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
 SPORK_APPDIR=${SPORK_APPDIR:-$HOME/Applications}
