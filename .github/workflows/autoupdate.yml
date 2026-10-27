@@ -1,0 +1,79 @@
+# Reusable workflow that keeps a drawer's manifests at their latest versions,
+# like Scoop's "Excavator". Call it from a drawer repo on a schedule:
+#
+#   on:
+#     schedule: [{cron: "23 */6 * * *"}]
+#     workflow_dispatch:
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     autoupdate:
+#       uses: spork-pm/spork/.github/workflows/autoupdate.yml@main
+#
+# See examples/drawer-autoupdate.yml for a complete caller.
+name: Autoupdate manifests
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: "Packages to check, separated by spaces (default: all with a checkver field)"
+        type: string
+        default: ""
+      mode:
+        description: "push: commit straight to the branch. pr: one pull request per package."
+        type: string
+        default: push
+      test:
+        description: Install each updated manifest with spork on macOS before committing it
+        type: boolean
+        default: true
+      spork-repository:
+        description: Where to get spork's tools from
+        type: string
+        default: spork-pm/spork
+      spork-ref:
+        description: Branch, tag or commit of spork to use
+        type: string
+        default: main
+    secrets:
+      token:
+        description: >-
+          Token used to push and open pull requests. Defaults to GITHUB_TOKEN, whose pushes
+          don't start other workflows; pass a PAT or app token if the drawer has CI that should run.
+        required: false
+
+jobs:
+  autoupdate:
+    runs-on: ${{ inputs.test && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out the drawer
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.token || github.token }}
+
+      - name: Check out spork
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.spork-repository }}
+          ref: ${{ inputs.spork-ref }}
+          path: .spork-src
+          persist-credentials: false
+
+      - name: Hide spork's checkout from git
+        run: echo .spork-src >> .git/info/exclude
+
+      - name: Update manifests
+        env:
+          GITHUB_TOKEN: ${{ secrets.token || github.token }}
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          AUTOUPDATE_MODE: ${{ inputs.mode }}
+          AUTOUPDATE_TEST: ${{ inputs.test && '1' || '0' }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # PACKAGES is split on spaces on purpose.
+          .spork-src/tools/drawer-autoupdate $PACKAGES
