@@ -14,7 +14,7 @@ A [Scoop](https://scoop.sh)-style package manager for macOS that works without a
 ./install.sh
 ```
 
-This copies spork to `~/.spork`, sets up the bundled `main` bucket, and adds this line to
+This copies spork to `~/.spork`, sets up the bundled `main` drawer, and adds this line to
 `~/.zshrc` (or `~/.bash_profile`):
 
 ```bash
@@ -30,11 +30,11 @@ to use different folders.
 spork search json          # find packages
 spork install jq rectangle # install a CLI tool and a GUI app
 spork list                 # what's installed
-spork update               # refresh buckets, show what's outdated
+spork update               # refresh drawers, show what's outdated
 spork update --all         # update everything
 spork uninstall rectangle
 spork hold jq              # pin a version (spork unhold jq to undo)
-spork doctor               # check PATH, folders, buckets
+spork doctor               # check PATH, folders, drawers
 ```
 
 Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `cache`, `hash`,
@@ -48,7 +48,7 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
   bin/                    # add to PATH: symlinks to commands
   apps/<pkg>/<version>/   # unpacked package files
   apps/<pkg>/current      # symlink to the installed version
-  buckets/<name>/         # manifest collections
+  drawers/<name>/         # manifest collections
   cache/                  # downloads, reused on reinstall
 ~/Applications/           # .app bundles
 ```
@@ -56,16 +56,16 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
 Command links point through `current`, so they keep working across updates. Old versions are
 deleted after an update.
 
-## Buckets
+## Drawers
 
-A bucket is a folder or git repo of JSON manifests, in a `bucket/` subfolder or at the top level
-(same as Scoop).
+A drawer is a folder or git repo of JSON manifests, in a `drawer/` subfolder or at the top level.
+It's what Scoop calls a bucket.
 
 ```bash
-spork bucket add work https://github.com/your-org/spork-bucket  # git, or a tarball download if git is missing
-spork bucket add local ~/my-manifests                           # a local folder (linked, edits show up immediately)
-spork bucket list
-spork install work/sometool                                     # pick a bucket explicitly
+spork drawer add work https://github.com/your-org/spork-drawer  # git, or a tarball download if git is missing
+spork drawer add local ~/my-manifests                           # a local folder (linked, edits show up immediately)
+spork drawer list
+spork install work/sometool                                     # pick a drawer explicitly
 ```
 
 You can also install straight from a manifest: `spork install ./foo.json` or
@@ -107,7 +107,7 @@ Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.
 (mounted read-only, contents copied), `.pkg` (payload unpacked; its installer scripts are **not**
 run), `.gz`, and plain binaries.
 
-Look at [bucket/](bucket/) for working examples (ripgrep, fd, jq, Rectangle).
+Look at [drawer/](drawer/) for working examples (ripgrep, fd, jq, Rectangle, Headlamp).
 
 ## Mirrors and proxies
 
@@ -125,13 +125,13 @@ spork mirror rm https://codeload.github.com/
 With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 `https://artifactory.example.com/artifactory/github/jqlang/jq/releases/…`.
 
-- Rules apply to package downloads, manifest URLs, `spork hash`, bucket downloads and git
-  buckets (through git's `insteadOf`, so the bucket keeps its original URL).
+- Rules apply to package downloads, manifest URLs, `spork hash`, drawer downloads and git
+  drawers (through git's `insteadOf`, so the drawer keeps its original URL).
 - When several rules match, the longest prefix wins.
 - Checksums still come from the manifest, so a mirror can't hand you a different file.
 - Rules live in `~/.spork/mirrors`, one `<from> <to>` per line (`#` starts a comment). Set
   `SPORK_MIRRORS_FILE` to use a shared file instead, e.g. one your team maintains.
-- Buckets downloaded without git come from `codeload.github.com`, so mirror that host too.
+- Drawers downloaded without git come from `codeload.github.com`, so mirror that host too.
 - If the replacement must contain the whole original URL, put it in the rule, e.g.
   `spork mirror add https://github.com/ https://proxy.example.com/fetch/https://github.com/`.
 
@@ -141,6 +141,6 @@ With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
   `.zip`/`.dmg` build when one exists.
 - Apps that insist on living in `/Applications`, or that install privileged helpers or kernel/system
   extensions, need an admin.
-- Version checks compare strings: any change in a bucket's `version` counts as an update.
+- Version checks compare strings: any change in a drawer's `version` counts as an update.
 - Downloads use `curl`, so HTTP proxies work through `https_proxy` / `HTTPS_PROXY`. For
   mirrors that need different URLs, see [Mirrors and proxies](#mirrors-and-proxies).

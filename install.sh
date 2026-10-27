@@ -6,16 +6,16 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
 
-mkdir -p "$SPORK_HOME/libexec" "$SPORK_HOME/bin" "$SPORK_HOME/buckets" "$HOME/Applications"
+mkdir -p "$SPORK_HOME/libexec" "$SPORK_HOME/bin" "$SPORK_HOME/drawers" "$HOME/Applications"
 cp "$here/spork" "$SPORK_HOME/libexec/spork"
 chmod +x "$SPORK_HOME/libexec/spork"
 ln -sfn "$SPORK_HOME/libexec/spork" "$SPORK_HOME/bin/spork"
 
-# The bundled "main" bucket. Leave it alone if the user pointed main elsewhere.
-main=$SPORK_HOME/buckets/main
+# The bundled "main" drawer. Leave it alone if the user pointed main elsewhere.
+main=$SPORK_HOME/drawers/main
 if [ ! -e "$main" ] || { [ ! -L "$main" ] && [ ! -d "$main/.git" ] && [ ! -f "$main/.spork-source" ]; }; then
   rm -rf "$main"; mkdir -p "$main"
-  cp -R "$here/bucket" "$main/bucket"
+  cp -R "$here/drawer" "$main/drawer"
 fi
 
 echo "spork installed in $SPORK_HOME"
