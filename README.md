@@ -197,7 +197,7 @@ With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 ### Mirrors that need a login
 
 If your login keychain has an internet password for a mirror's host, spork sends it as HTTP basic
-auth on every download that goes through that mirror, git drawers included. Save one with:
+auth on every download that goes through that mirror. Save one with:
 
 ```bash
 security add-internet-password -s artifactory.example.com -a your.name -w
@@ -211,8 +211,9 @@ security add-internet-password -s artifactory.example.com -a your.name -w
   Choose **Always Allow** to skip it next time.
 - Only rewritten URLs get the login: it is never sent to the original site, and curl drops it if
   the mirror redirects to another host.
-- The password never appears on a command line (curl reads it from stdin, git from its
-  environment).
+- The password never appears on a command line (curl reads it from stdin).
+- git drawers don't use this login. git asks its own credential helper instead (on macOS,
+  usually `osxkeychain`, which reads the same keychain).
 - Set `SPORK_KEYCHAIN=0` to turn this off.
 
 ## Limits
