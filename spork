@@ -196,7 +196,8 @@ app_running() { pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1; }
 # The mirrors file holds URL rewrite rules, one per line: "<from-prefix> <to-prefix>".
 # A URL starting with <from-prefix> is downloaded from <to-prefix> + the rest of
 # the URL instead. When several rules match, the longest prefix wins.
-# Lines starting with # are comments.
+# Lines starting with # are comments. Rules apply to curl downloads only;
+# git drawers clone straight from their URL.
 
 mirror_rules() {
   [ -f "$MIRRORS_FILE" ] && awk 'NF >= 2 && $1 !~ /^#/ { print $1 "\t" $2 }' "$MIRRORS_FILE"
@@ -221,7 +222,6 @@ EOF
 # login keychain has an internet password for the mirror's host. Only URLs that a
 # mirror rule rewrote get credentials, so nothing is sent to the original sites.
 # The password never appears on a command line: curl reads it from stdin.
-# git drawers don't get it; git uses its own credential helpers.
 # SPORK_KEYCHAIN=0 turns this off.
 
 url_host() { local h=${1#*://}; h=${h%%/*}; h=${h##*@}; echo "${h%%:*}"; }
@@ -269,19 +269,6 @@ mcurl() {
   else
     curl "$@"
   fi
-}
-
-# git with each mirror rule passed as url.<to>.insteadOf=<from>, so drawers keep
-# their original URL and follow mirror changes.
-mgit() {
-  local -a opts
-  local from to
-  while IFS=$'\t' read -r from to; do
-    [ -n "$from" ] && opts+=(-c "url.$to.insteadOf=$from")
-  done <<EOF
-$(mirror_rules)
-EOF
-  git "${opts[@]}" "$@"
 }
 
 # ---------------------------------------------------------------- download, verify, extract
@@ -732,7 +719,7 @@ update_drawer() {
   if [ -L "$d" ]; then return 0
   elif [ -d "$d/.git" ]; then
     has_git || { warn "can't update '$b': git is not available"; return 0; }
-    note "updating drawer $b"; mgit -C "$d" pull --ff-only -q || warn "could not update drawer $b"
+    note "updating drawer $b"; git -C "$d" pull --ff-only -q || warn "could not update drawer $b"
   elif [ -f "$d/.spork-source" ]; then
     note "updating drawer $b"; ( fetch_drawer_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update drawer $b"
   fi
@@ -856,8 +843,8 @@ cmd_drawer() {
       if [ -d "$url" ]; then
         ln -s "$(cd "$url" && pwd)" "$d"
       elif has_git; then
-        mgit clone -q --depth 1 "$url" "$d" \
-          || die "could not clone $url (if your network blocks it, see: spork mirror add)"
+        git clone -q --depth 1 "$url" "$d" \
+          || die "could not clone $url"
       else
         fetch_drawer_tarball "$url" "$d"
       fi

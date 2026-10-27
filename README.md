@@ -23,7 +23,8 @@ eval "$(~/.spork/bin/spork shellenv)"
 
 Pass `--no-modify-path` to skip editing your shell file. Set `SPORK_HOME` or `SPORK_APPDIR`
 to use different folders. If your network blocks GitHub, set up [mirrors](#mirrors-and-proxies)
-first (or point `SPORK_MIRRORS_FILE` at a shared rules file), then run the installer.
+for downloads (or point `SPORK_MIRRORS_FILE` at a shared rules file). Mirrors don't apply to git,
+so the installer's drawers must be reachable by git or through git's own `insteadOf` config.
 
 ## Usage
 
@@ -184,8 +185,9 @@ spork mirror rm https://codeload.github.com/
 With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 `https://artifactory.example.com/artifactory/github/jqlang/jq/releases/…`.
 
-- Rules apply to package downloads, manifest URLs, `spork hash`, drawer downloads and git
-  drawers (through git's `insteadOf`, so the drawer keeps its original URL).
+- Rules apply to package downloads, manifest URLs, `spork hash` and drawers downloaded without
+  git. git drawers clone straight from their URL; use git's own `url.<base>.insteadOf` config
+  if you need to redirect them.
 - When several rules match, the longest prefix wins.
 - Checksums still come from the manifest, so a mirror can't hand you a different file.
 - Rules live in `~/.spork/mirrors`, one `<from> <to>` per line (`#` starts a comment). Set
@@ -212,8 +214,6 @@ security add-internet-password -s artifactory.example.com -a your.name -w
 - Only rewritten URLs get the login: it is never sent to the original site, and curl drops it if
   the mirror redirects to another host.
 - The password never appears on a command line (curl reads it from stdin).
-- git drawers don't use this login. git asks its own credential helper instead (on macOS,
-  usually `osxkeychain`, which reads the same keychain).
 - Set `SPORK_KEYCHAIN=0` to turn this off.
 
 ## Limits
