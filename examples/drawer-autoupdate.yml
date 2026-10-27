@@ -1,0 +1,33 @@
+# Copy this into a drawer repo as .github/workflows/autoupdate.yml.
+# Every 6 hours it checks each manifest that has a "checkver" field, and commits
+# the ones with a newer version (after a test install on macOS).
+name: Autoupdate
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Packages to check, separated by spaces (empty = all)
+        required: false
+        default: ""
+
+# Don't let two runs push at the same time.
+concurrency:
+  group: autoupdate
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  autoupdate:
+    uses: spork-pm/spork/.github/workflows/autoupdate.yml@main
+    with:
+      packages: ${{ inputs.packages }}
+      # mode: pr        # open one pull request per package instead of pushing
+      # test: false     # skip the install test (runs on Linux instead of macOS)
+    # secrets:
+    #   token: ${{ secrets.AUTOUPDATE_TOKEN }}  # a PAT, so the push starts the drawer's own CI

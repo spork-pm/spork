@@ -1,0 +1,116 @@
+#!/bin/bash
+# drawer-autoupdate - update a drawer's manifests to their latest versions and commit them.
+#
+# Run from the root of a drawer repo:
+#     path/to/spork/tools/drawer-autoupdate [package ...]
+#
+# Runs checkver --update, installs each updated manifest with spork in a throwaway
+# SPORK_HOME to make sure it works, then commits it as "<pkg>: Update to version <ver>".
+# A manifest that fails to install is left out and makes the script exit 1.
+#
+# Environment:
+#   AUTOUPDATE_MODE=push   commit onto the current branch and push it (default)
+#   AUTOUPDATE_MODE=pr     one branch (autoupdate/<pkg>) and pull request per package, with gh
+#   AUTOUPDATE_TEST=0      skip the install test (it needs macOS)
+#   AUTOUPDATE_DRY_RUN=1   commit locally, but don't push or open pull requests
+#   SPORK_BIN              spork script to test with (default: the one next to this tools folder)
+#   GITHUB_TOKEN           avoids GitHub API rate limits; gh also needs it (or GH_TOKEN) for pr mode
+set -uo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+spork=${SPORK_BIN:-$(dirname "$here")/spork}
+mode=${AUTOUPDATE_MODE:-push}
+testing=${AUTOUPDATE_TEST:-1}
+dry=${AUTOUPDATE_DRY_RUN:-}
+summary=${GITHUB_STEP_SUMMARY:-/dev/null}
+status=0
+
+case $mode in push|pr) ;; *) echo "AUTOUPDATE_MODE must be push or pr" >&2; exit 2 ;; esac
+dir=drawer; [ -d drawer ] || dir=.
+base=$(git rev-parse --abbrev-ref HEAD)
+[ "$base" != HEAD ] || { echo "drawer-autoupdate: check out a branch first" >&2; exit 2; }
+if [ "$testing" = 1 ] && [ "$(uname)" != Darwin ]; then
+  echo "::warning::Install tests need macOS; skipping them."
+  testing=0
+fi
+
+python3 "$here/checkver" --dir "$dir" --update "$@" || status=1
+
+changed=$(git diff --name-only -- "$dir/*.json")
+if [ -z "$changed" ]; then
+  echo "Everything is up to date."
+  exit $status
+fi
+
+# Keep the updated manifests aside, so each one can be tested and committed on its own.
+pending=$(mktemp -d)
+for f in $changed; do cp "$f" "$pending/"; done
+git checkout -q -- $changed
+
+if [ "$testing" = 1 ]; then
+  export SPORK_HOME=$pending/home SPORK_APPDIR=$pending/home/Applications
+  # Lets manifests that depend on others in this drawer find them.
+  "$spork" drawer add "$(basename "$PWD")" "$PWD" >/dev/null
+fi
+
+test_install() {
+  local f=$1 name rc
+  name=$(basename "$f" .json)
+  echo "::group::spork install $name"
+  "$spork" install "./$f"; rc=$?
+  "$spork" uninstall --purge "$name" >/dev/null 2>&1
+  echo "::endgroup::"
+  return $rc
+}
+
+{ echo "| Package | Version | Result |"; echo "|---|---|---|"; } >> "$summary"
+
+for f in $changed; do
+  name=$(basename "$f" .json)
+  ver=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$pending/$name.json")
+  msg="$name: Update to version $ver"
+  branch=autoupdate/$name
+
+  [ "$mode" = pr ] && git switch -q -C "$branch" "$base"
+  cp "$pending/$name.json" "$f"
+
+  if [ "$testing" = 1 ] && ! test_install "$f"; then
+    echo "::error file=$f::$name $ver failed to install; not committed"
+    echo "| $name | $ver | ❌ install failed |" >> "$summary"
+    git checkout -q -- "$f"
+    [ "$mode" = pr ] && git switch -q "$base"
+    status=1
+    continue
+  fi
+
+  git add "$f" && git commit -q -m "$msg"
+  echo "$msg"
+
+  if [ "$mode" = pr ]; then
+    result="committed to $branch"
+    if [ -z "$dry" ]; then
+      git push -q -f origin "$branch" || { status=1; git switch -q "$base"; continue; }
+      if [ -n "$(gh pr list --head "$branch" --base "$base" --state open --json number --jq '.[].number')" ]; then
+        gh pr edit "$branch" --title "$msg" >/dev/null
+        result="updated pull request"
+      else
+        gh pr create --head "$branch" --base "$base" --title "$msg" \
+          --body "Automated update by spork's \`checkver\`. The manifest was installed successfully on macOS before this pull request was opened." \
+          >/dev/null || status=1
+        result="opened pull request"
+      fi
+    fi
+    git switch -q "$base"
+  else
+    result=committed
+  fi
+  echo "| $name | $ver | ✅ $result |" >> "$summary"
+done
+
+if [ "$mode" = push ] && [ -z "$dry" ] && [ -n "$(git log "origin/$base..HEAD" --oneline 2>/dev/null)" ]; then
+  # Someone may have pushed while we were downloading.
+  git pull -q --rebase origin "$base" && git push -q origin "HEAD:$base" || status=1
+fi
+
+rm -rf "$pending"
+exit $status

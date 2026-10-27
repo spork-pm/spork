@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""checkver - find the latest version of spork packages and update their manifests.
+
+    tools/checkver [options] [package|manifest.json ...]
+
+With no packages, checks every manifest in the drawer. A manifest takes part when it has a
+"checkver" field (how to find the latest version) and, to be updated, an "autoupdate" field
+(how to build the new url, hash and extract_dir from that version). See tools/README.md
+for the format.
+
+Options:
+    -d, --dir DIR        drawer folder (default: ./drawer if it exists, else .)
+    -u, --update         rewrite manifests that are out of date
+    -f, --force          with -u, rewrite even when the version hasn't changed
+    -v, --version VER    use VER instead of looking it up (one package only, implies -u)
+    -q, --quiet          only print packages that are out of date or fail
+
+Exits 1 if any package failed. Uses only the Python standard library. Set GITHUB_TOKEN to
+avoid GitHub's API rate limit.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+USER_AGENT = "spork-checkver (+https://github.com/spork-pm/spork)"
+HASH_ALGOS = {40: "sha1", 64: "sha256", 128: "sha512"}
+
+
+class CheckverError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- http
+
+def open_url(url):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    host = urllib.parse.urlsplit(url).hostname or ""
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and host == "api.github.com":
+        req.add_header("Authorization", "Bearer " + token)
+        req.add_header("Accept", "application/vnd.github+json")
+    try:
+        return urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        raise CheckverError("%s: HTTP %s" % (url, e.code))
+    except urllib.error.URLError as e:
+        raise CheckverError("%s: %s" % (url, e.reason))
+
+
+def fetch_text(url):
+    with open_url(url) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def hash_download(url):
+    h = hashlib.sha256()
+    with open_url(url) as r:
+        for chunk in iter(lambda: r.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def strip_fragment(url):
+    """spork's "#/name" suffix renames a download; it isn't part of the URL."""
+    return url.split("#", 1)[0]
+
+
+# ---------------------------------------------------------------- regex and jsonpath
+
+def compile_regex(pattern):
+    # Accept .NET/Scoop-style named groups (?<name>...) as well as Python's (?P<name>...).
+    return re.compile(re.sub(r"\(\?<([A-Za-z_]\w*)>", r"(?P<\1>", pattern), re.MULTILINE)
+
+
+_JP_TOKEN = re.compile(
+    r"""\.\*|\[\*\]|\.([A-Za-z_][\w-]*)|\[(-?\d+)\]|\[['"]([^'"]+)['"]\]"""
+    r"""|\[\?\(@\.([\w-]+)\s*(?:(==|!=)\s*(.+?))?\)\]"""
+)
+
+
+def _jp_literal(text):
+    text = text.strip()
+    if text[:1] in "'\"" and text[-1:] == text[:1]:
+        return text[1:-1]
+    return json.loads(text)
+
+
+def jsonpath(data, path):
+    """A small JSONPath subset: $.a.b, $[0], $[*], $['key'], $[?(@.key)], $[?(@.key == 'x')]."""
+    if not path.startswith("$"):
+        raise CheckverError("jsonpath must start with $: " + path)
+    nodes, rest = [data], path[1:]
+    while rest:
+        m = _JP_TOKEN.match(rest)
+        if not m:
+            raise CheckverError("unsupported jsonpath at %r in %s" % (rest, path))
+        rest = rest[m.end():]
+        key, index, qkey, fkey, op, value = m.groups()
+        out = []
+        for n in nodes:
+            if m.group(0) in (".*", "[*]"):
+                out.extend(n.values() if isinstance(n, dict) else n if isinstance(n, list) else [])
+            elif key is not None or qkey is not None:
+                k = key if key is not None else qkey
+                if isinstance(n, dict) and k in n:
+                    out.append(n[k])
+            elif index is not None:
+                i = int(index)
+                if isinstance(n, list) and -len(n) <= i < len(n):
+                    out.append(n[i])
+            else:  # filter
+                items = n if isinstance(n, list) else n.values() if isinstance(n, dict) else []
+                for item in items:
+                    if not isinstance(item, dict) or fkey not in item:
+                        continue
+                    v = item[fkey]
+                    if op is None:
+                        ok = v not in (None, False, "", 0)
+                    else:
+                        ok = (v == _jp_literal(value)) == (op == "==")
+                    if ok:
+                        out.append(item)
+        nodes = out
+    return nodes
+
+
+# ---------------------------------------------------------------- versions
+
+def version_tokens(v):
+    return [int(t) if t.isdigit() else t.lower() for t in re.findall(r"\d+|[A-Za-z]+", v)]
+
+
+def compare_versions(a, b):
+    """-1, 0 or 1. Numbers compare numerically; a trailing word marks a pre-release
+    (1.0-rc1 < 1.0), a trailing number a later build (1.0 < 1.0-2)."""
+    ta, tb = version_tokens(a), version_tokens(b)
+    for x, y in zip(ta, tb):
+        if x == y:
+            continue
+        if isinstance(x, int) and isinstance(y, int):
+            return -1 if x < y else 1
+        if isinstance(x, int):
+            return 1
+        if isinstance(y, int):
+            return -1
+        return -1 if x < y else 1
+    if len(ta) == len(tb):
+        return 0
+    longer, sign = (tb, -1) if len(tb) > len(ta) else (ta, 1)
+    extra = longer[min(len(ta), len(tb))]
+    return sign if isinstance(extra, int) else -sign
+
+
+def version_vars(version, groups):
+    parts = re.split(r"[.\-+_]", version)
+    numeric = re.match(r"\d+(?:\.\d+)*", version)
+    head = numeric.group(0) if numeric else version
+    pre = version.split("-", 1)[1] if "-" in version else ""
+    v = {
+        "version": version,
+        "majorVersion": parts[0] if len(parts) > 0 else "",
+        "minorVersion": parts[1] if len(parts) > 1 else "",
+        "patchVersion": parts[2] if len(parts) > 2 else "",
+        "buildVersion": parts[3] if len(parts) > 3 else "",
+        "preReleaseVersion": pre,
+        "cleanVersion": re.sub(r"[.\-]", "", version),
+        "dotVersion": re.sub(r"[\-_]", ".", version),
+        "underscoreVersion": re.sub(r"[.\-]", "_", version),
+        "dashVersion": re.sub(r"[._]", "-", version),
+        "matchHead": head,
+        "matchTail": version[len(head):],
+    }
+    for name, value in groups.items():
+        if value is not None:
+            v["match" + name[:1].upper() + name[1:]] = value
+    return v
+
+
+def substitute(value, variables):
+    """Replace $name in strings (recursively in lists and dicts), ignoring case. Only known names
+    are replaced, longest first, so "gh_$version_macOS" works and hook variables like $dir stay."""
+    if isinstance(value, str):
+        lower = {k.lower(): v for k, v in variables.items()}
+        names = sorted(variables, key=len, reverse=True)
+        if not names:
+            return value
+        pattern = r"\$(%s)" % "|".join(re.escape(n) for n in names)
+        return re.sub(pattern, lambda m: lower[m.group(1).lower()], value, flags=re.IGNORECASE)
+    if isinstance(value, list):
+        return [substitute(x, variables) for x in value]
+    if isinstance(value, dict):
+        return {k: substitute(x, variables) for k, x in value.items()}
+    return value
+
+
+# ---------------------------------------------------------------- checkver
+
+def github_repo(spec):
+    m = re.match(r"(?:https?://github\.com/)?([\w.-]+/[\w.-]+?)(?:\.git)?/?$", spec)
+    if not m:
+        raise CheckverError("not a GitHub repository: " + spec)
+    return m.group(1)
+
+
+def check_version(manifest):
+    """Return (version, named groups) for the latest release."""
+    cv = manifest["checkver"]
+    if isinstance(cv, str):
+        cv = {"github": manifest.get("homepage", "")} if cv == "github" else {"regex": cv}
+    if not isinstance(cv, dict):
+        raise CheckverError("checkver must be a string or an object")
+
+    if "github" in cv:
+        repo = github_repo(cv["github"] or manifest.get("homepage", ""))
+        url = "https://api.github.com/repos/%s/releases/latest" % repo
+        default_regex = r'"tag_name":\s*"[^"\d]*(?P<version>\d[^"]*)"'
+    else:
+        url = cv.get("url") or manifest.get("homepage")
+        default_regex = None
+    if not url:
+        raise CheckverError("checkver has no url and the manifest has no homepage")
+    text = fetch_text(url)
+
+    if "jsonpath" in cv:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise CheckverError("%s did not return JSON" % url)
+        found = jsonpath(data, cv["jsonpath"])
+        if not found:
+            raise CheckverError("jsonpath %s matched nothing in %s" % (cv["jsonpath"], url))
+        text = found[0] if isinstance(found[0], str) else json.dumps(found[0])
+        default_regex = r"(?P<version>.+)"
+
+    pattern = cv.get("regex", default_regex)
+    if not pattern:
+        raise CheckverError("checkver needs a regex (or github / jsonpath)")
+    m = compile_regex(pattern).search(text)
+    if not m:
+        raise CheckverError("regex %r matched nothing in %s" % (pattern, url))
+
+    groups = {k: v for k, v in m.groupdict().items() if v is not None}
+    if "replace" in cv:
+        template = re.sub(r"\$\{(\w+)\}", r"\\g<\1>", cv["replace"])
+        version = m.expand(template)
+    elif "version" in groups:
+        version = groups["version"]
+    elif m.re.groups:
+        version = m.group(1)
+    else:
+        version = m.group(0)
+    return version.strip(), groups
+
+
+# ---------------------------------------------------------------- autoupdate
+
+def find_hash(spec, url, variables):
+    """Read a hash from a checksum file or API instead of downloading `url`."""
+    path = urllib.parse.urlsplit(url).path
+    local = dict(variables, url=url, baseurl=url.rsplit("/", 1)[0], basename=path.rsplit("/", 1)[-1])
+    spec = substitute(spec, local)
+    src = spec.get("url", url)
+    text = fetch_text(src)
+    if "jsonpath" in spec:
+        found = jsonpath(json.loads(text), spec["jsonpath"])
+        text = str(found[0]) if found else ""
+    if "regex" in spec:
+        m = compile_regex(spec["regex"]).search(text)
+        found = (m.groupdict().get("hash") or (m.group(1) if m.re.groups else m.group(0))) if m else None
+    else:
+        # A line listing this file, like sha256sum output: "<hash>  [*]<basename>".
+        m = re.search(r"^([0-9a-fA-F]{40,128})\s+\*?%s\s*$" % re.escape(local["basename"]),
+                      text, re.MULTILINE)
+        if m:
+            found = m.group(1)
+        else:  # a file that holds just one hash
+            alone = re.findall(r"\b[0-9a-fA-F]{40,128}\b", text)
+            found = alone[0] if len(alone) == 1 else None
+    if not found:
+        raise CheckverError("no hash for %s in %s" % (local["basename"], src))
+    found = found.strip().lower()
+    if len(found) not in HASH_ALGOS:
+        raise CheckverError("%s: %r doesn't look like a hash" % (src, found))
+    return "%s:%s" % (HASH_ALGOS[len(found)], found)
+
+
+def hashes_for(urls, spec, variables, log):
+    out = []
+    for u in urls:
+        u = strip_fragment(u)
+        if isinstance(spec, dict):
+            out.append(find_hash(spec, u, variables))
+        else:
+            log("    hashing %s" % u)
+            out.append(hash_download(u))
+    return out
+
+
+def apply_section(target, auto, variables, log, hash_spec=None):
+    """Copy autoupdate fields into one manifest section (top level or one architecture)."""
+    for key, value in auto.items():
+        if key in ("hash", "architecture"):
+            continue
+        target[key] = substitute(value, variables)
+    if "url" in auto:
+        urls = target["url"] if isinstance(target["url"], list) else [target["url"]]
+        hashes = hashes_for(urls, auto.get("hash", hash_spec), variables, log)
+        target["hash"] = hashes if isinstance(target["url"], list) else hashes[0]
+
+
+def autoupdate(manifest, version, groups, log):
+    auto = manifest.get("autoupdate")
+    if not isinstance(auto, dict):
+        raise CheckverError("no autoupdate field, update it by hand")
+    variables = version_vars(version, groups)
+    updated = json.loads(json.dumps(manifest))  # deep copy, keeps key order
+    updated["version"] = version
+    apply_section(updated, auto, variables, log)
+    for arch, section in (auto.get("architecture") or {}).items():
+        target = updated.setdefault("architecture", {}).setdefault(arch, {})
+        apply_section(target, section, variables, log, auto.get("hash"))
+    return updated
+
+
+# ---------------------------------------------------------------- main
+
+def manifest_paths(args):
+    folder = args.dir or ("drawer" if os.path.isdir("drawer") else ".")
+    if not args.packages:
+        return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".json"))
+    paths = []
+    for p in args.packages:
+        path = p if p.endswith(".json") else os.path.join(folder, p + ".json")
+        if not os.path.isfile(path):
+            sys.exit("checkver: no manifest %s" % path)
+        paths.append(path)
+    return paths
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="checkver", description=__doc__.split("\n\n")[0])
+    ap.add_argument("packages", nargs="*")
+    ap.add_argument("-d", "--dir")
+    ap.add_argument("-u", "--update", action="store_true")
+    ap.add_argument("-f", "--force", action="store_true")
+    ap.add_argument("-v", "--version", dest="set_version")
+    ap.add_argument("-q", "--quiet", action="store_true")
+    args = ap.parse_args(argv)
+    if args.set_version:
+        if len(args.packages) != 1:
+            sys.exit("checkver: --version needs exactly one package")
+        args.update = args.force = True
+
+    def log(msg):
+        if not args.quiet:
+            print(msg, flush=True)
+
+    failed = False
+    for path in manifest_paths(args):
+        name = os.path.basename(path)[:-5]
+        try:
+            with open(path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            if "checkver" not in manifest:
+                if args.packages:
+                    print("%s: no checkver field" % name)
+                continue
+            current = manifest.get("version", "")
+            if args.set_version:
+                latest, groups = args.set_version, {}
+            else:
+                latest, groups = check_version(manifest)
+            newer = compare_versions(latest, current) > 0
+            if args.set_version:
+                print("%s: %s (setting to %s)" % (name, current, latest), flush=True)
+            elif latest == current:
+                log("%s: %s" % (name, current))
+            elif newer:
+                print("%s: %s (latest: %s)" % (name, current, latest), flush=True)
+            else:
+                log("%s: %s (latest is older: %s, skipped)" % (name, current, latest))
+            if args.update and (newer or args.force):
+                updated = autoupdate(manifest, latest, groups, log)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(updated, indent=4, ensure_ascii=False) + "\n")
+                print("%s: updated to %s" % (name, latest), flush=True)
+        except (CheckverError, ValueError, KeyError, OSError) as e:
+            failed = True
+            print("%s: error: %s" % (name, e), file=sys.stderr, flush=True)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
