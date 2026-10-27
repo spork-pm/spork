@@ -23,7 +23,8 @@ eval "$(~/.spork/bin/spork shellenv)"
 
 Pass `--no-modify-path` to skip editing your shell file. Set `SPORK_HOME` or `SPORK_APPDIR`
 to use different folders. If your network blocks GitHub, set up [mirrors](#mirrors-and-proxies)
-first (or point `SPORK_MIRRORS_FILE` at a shared rules file), then run the installer.
+for downloads (or point `SPORK_MIRRORS_FILE` at a shared rules file). Mirrors don't apply to git,
+so the installer's drawers must be reachable by git or through git's own `insteadOf` config.
 
 ## Usage
 
@@ -184,8 +185,9 @@ spork mirror rm https://codeload.github.com/
 With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 `https://artifactory.example.com/artifactory/github/jqlang/jq/releases/…`.
 
-- Rules apply to package downloads, manifest URLs, `spork hash`, drawer downloads and git
-  drawers (through git's `insteadOf`, so the drawer keeps its original URL).
+- Rules apply to package downloads, manifest URLs, `spork hash` and drawers downloaded without
+  git. git drawers clone straight from their URL; use git's own `url.<base>.insteadOf` config
+  if you need to redirect them.
 - When several rules match, the longest prefix wins.
 - Checksums still come from the manifest, so a mirror can't hand you a different file.
 - Rules live in `~/.spork/mirrors`, one `<from> <to>` per line (`#` starts a comment). Set
@@ -193,6 +195,26 @@ With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 - Drawers downloaded without git come from `codeload.github.com`, so mirror that host too.
 - If the replacement must contain the whole original URL, put it in the rule, e.g.
   `spork mirror add https://github.com/ https://proxy.example.com/fetch/https://github.com/`.
+
+### Mirrors that need a login
+
+If your login keychain has an internet password for a mirror's host, spork sends it as HTTP basic
+auth on every download that goes through that mirror. Save one with:
+
+```bash
+security add-internet-password -s artifactory.example.com -a your.name -w
+```
+
+(`-w` last makes `security` ask for the password, so it stays out of your shell history.)
+
+- `spork mirror list` and `spork doctor` show which mirrors have a login. Neither reads the
+  password, so they never trigger a keychain prompt.
+- The first real download may show a keychain prompt asking to let `security` read the password.
+  Choose **Always Allow** to skip it next time.
+- Only rewritten URLs get the login: it is never sent to the original site, and curl drops it if
+  the mirror redirects to another host.
+- The password never appears on a command line (curl reads it from stdin).
+- Set `SPORK_KEYCHAIN=0` to turn this off.
 
 ## Limits
 

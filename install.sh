@@ -24,7 +24,7 @@ for name in main apps; do
   fi
   rm -rf "$d"
   "$SPORK_HOME/bin/spork" drawer add "$name" \
-    || echo "Couldn't add the '$name' drawer. Set up mirrors if needed (spork mirror add), then run: spork drawer add $name"
+    || echo "Couldn't add the '$name' drawer. Check that you can reach its URL, then run: spork drawer add $name"
 done
 
 line='eval "$('"$SPORK_HOME"'/bin/spork shellenv)"'

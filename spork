@@ -196,7 +196,8 @@ app_running() { pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1; }
 # The mirrors file holds URL rewrite rules, one per line: "<from-prefix> <to-prefix>".
 # A URL starting with <from-prefix> is downloaded from <to-prefix> + the rest of
 # the URL instead. When several rules match, the longest prefix wins.
-# Lines starting with # are comments.
+# Lines starting with # are comments. Rules apply to curl downloads only;
+# git drawers clone straight from their URL.
 
 mirror_rules() {
   [ -f "$MIRRORS_FILE" ] && awk 'NF >= 2 && $1 !~ /^#/ { print $1 "\t" $2 }' "$MIRRORS_FILE"
@@ -215,29 +216,66 @@ EOF
   if [ -n "$best" ]; then echo "$best_to${url#"$best"}"; else echo "$url"; fi
 }
 
+# ---------------------------------------------------------------- mirror logins
+#
+# Mirrors behind a login (Artifactory, Nexus, ...) get HTTP basic auth when the
+# login keychain has an internet password for the mirror's host. Only URLs that a
+# mirror rule rewrote get credentials, so nothing is sent to the original sites.
+# The password never appears on a command line: curl reads it from stdin.
+# SPORK_KEYCHAIN=0 turns this off.
+
+url_host() { local h=${1#*://}; h=${h%%/*}; h=${h##*@}; echo "${h%%:*}"; }
+
+# The account stored for a host. Reading it doesn't touch the password, so the
+# keychain never asks for permission here.
+keychain_account() {
+  [ "${SPORK_KEYCHAIN:-1}" != 0 ] && [ -n "$1" ] || return 1
+  command -v security >/dev/null 2>&1 || return 1
+  security find-internet-password -s "$1" 2>/dev/null \
+    | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1 | grep .
+}
+
+# Sets CRED_USER and CRED_PASS for a host, or fails when the keychain has no
+# login for it. Results are remembered so each host is looked up once per run.
+KC_HOST= KC_USER= KC_PASS= KC_MISS=' '
+mirror_creds() {
+  local host=$1
+  CRED_USER= CRED_PASS=
+  [ -n "$host" ] || return 1
+  case $KC_MISS in *" $host "*) return 1 ;; esac
+  if [ "$host" != "$KC_HOST" ]; then
+    KC_USER=$(keychain_account "$host") \
+      && KC_PASS=$(security find-internet-password -s "$host" -a "$KC_USER" -w 2>/dev/null) \
+      || { KC_MISS="$KC_MISS$host "; return 1; }
+    KC_HOST=$host
+  fi
+  CRED_USER=$KC_USER CRED_PASS=$KC_PASS
+}
+
+# A curl config line holding the login, quoted for curl's config syntax.
+curl_user_config() {
+  # sed, because bash 3.2 mangles backslashes in ${s//...} replacements.
+  printf 'user = "%s"\n' "$(printf '%s' "$1:$2" | sed 's/[\\"]/\\&/g')"
+}
+
 # curl through the mirror rules. The URL must be the last argument.
 # --proxy-negotiate lets curl log in to a Kerberos (SPNEGO) proxy with the
 # user's ticket; it does nothing when no proxy is set or the proxy doesn't ask.
 mcurl() {
-  local n=$# url
+  local n=$# url real
   url=${!n}
-  set -- --proxy-negotiate "${@:1:$((n - 1))}" "$(mirror_url "$url")"
-  curl "$@"
+  real=$(mirror_url "$url")
+  set -- --proxy-negotiate "${@:1:$((n - 1))}" "$real"
+  if [ "$real" != "$url" ] && mirror_creds "$(url_host "$real")"; then
+    curl -K - "$@" <<<"$(curl_user_config "$CRED_USER" "$CRED_PASS")"
+  else
+    curl "$@"
+  fi
 }
 
-# git with each mirror rule passed as url.<to>.insteadOf=<from>, so drawers keep
-# their original URL and follow mirror changes. Like mcurl, it logs in to a
-# Kerberos (SPNEGO) proxy with the user's ticket.
-mgit() {
-  local -a opts=(-c http.proxyAuthMethod=negotiate)
-  local from to
-  while IFS=$'\t' read -r from to; do
-    [ -n "$from" ] && opts+=(-c "url.$to.insteadOf=$from")
-  done <<EOF
-$(mirror_rules)
-EOF
-  git "${opts[@]}" "$@"
-}
+# git for network calls. Like mcurl, it logs in to a Kerberos (SPNEGO) proxy
+# with the user's ticket.
+netgit() { git -c http.proxyAuthMethod=negotiate "$@"; }
 
 # ---------------------------------------------------------------- download, verify, extract
 
@@ -246,9 +284,12 @@ fetch() {
   if [ -f "$out" ]; then note "using cached $(basename "$out")"; return 0; fi
   real=$(mirror_url "$url")
   say "Downloading $url"
-  [ "$real" != "$url" ] && note "via mirror $real"
+  if [ "$real" != "$url" ]; then
+    if mirror_creds "$(url_host "$real")"; then note "via mirror $real (as $CRED_USER)"
+    else note "via mirror $real"; fi
+  fi
   [ -t 2 ] && progress=--progress-bar
-  curl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$real" \
+  mcurl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$url" \
     || { rm -f "$out.part"; die "download failed: $real"; }
   mv "$out.part" "$out"
 }
@@ -684,7 +725,7 @@ update_drawer() {
   if [ -L "$d" ]; then return 0
   elif [ -d "$d/.git" ]; then
     has_git || { warn "can't update '$b': git is not available"; return 0; }
-    note "updating drawer $b"; mgit -C "$d" pull --ff-only -q || warn "could not update drawer $b"
+    note "updating drawer $b"; netgit -C "$d" pull --ff-only -q || warn "could not update drawer $b"
   elif [ -f "$d/.spork-source" ]; then
     note "updating drawer $b"; ( fetch_drawer_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update drawer $b"
   fi
@@ -808,8 +849,8 @@ cmd_drawer() {
       if [ -d "$url" ]; then
         ln -s "$(cd "$url" && pwd)" "$d"
       elif has_git; then
-        mgit clone -q --depth 1 "$url" "$d" \
-          || die "could not clone $url (if your network blocks it, see: spork mirror add)"
+        netgit clone -q --depth 1 "$url" "$d" \
+          || die "could not clone $url"
       else
         fetch_drawer_tarball "$url" "$d"
       fi
@@ -867,10 +908,11 @@ cmd_mirror() {
       mirror_rules | cut -f1 | grep -qxF -- "$1" || die "no mirror rule for $1"
       mirror_remove "$1"; say "Removed the mirror rule for $1" ;;
     list|ls|'')
-      local from to any=
+      local from to any= acct
       while IFS=$'\t' read -r from to; do
         [ -n "$from" ] || continue
         printf '%s\n    %s-> %s%s\n' "$from" "$D" "$N" "$to"; any=1
+        acct=$(keychain_account "$(url_host "$to")") && note "   login: $acct (from the keychain)"
       done <<EOF
 $(mirror_rules)
 EOF
@@ -936,6 +978,10 @@ cmd_doctor() {
   else ok=; warn "no drawers. Add the official ones with: spork drawer add main; spork drawer add apps"; fi
   local m; m=$(mirror_rules | grep -c .)
   [ "$m" -gt 0 ] && say "$m mirror rule(s) in $MIRRORS_FILE"
+  local h acct
+  for h in $(mirror_rules | cut -f2 | while IFS= read -r t; do url_host "$t"; done | sort -u); do
+    acct=$(keychain_account "$h") && say "Mirror $h: logging in as $acct (from the keychain)"
+  done
   if has_git; then say "git is available"
   else note "git not found: drawers will be downloaded as archives (GitHub only)"; fi
   [ "$ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd && note "Rosetta 2 is not running; Intel-only packages won't start"
