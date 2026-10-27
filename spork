@@ -216,17 +216,20 @@ EOF
 }
 
 # curl through the mirror rules. The URL must be the last argument.
+# --proxy-negotiate lets curl log in to a Kerberos (SPNEGO) proxy with the
+# user's ticket; it does nothing when no proxy is set or the proxy doesn't ask.
 mcurl() {
   local n=$# url
   url=${!n}
-  set -- "${@:1:$((n - 1))}" "$(mirror_url "$url")"
+  set -- --proxy-negotiate "${@:1:$((n - 1))}" "$(mirror_url "$url")"
   curl "$@"
 }
 
 # git with each mirror rule passed as url.<to>.insteadOf=<from>, so drawers keep
-# their original URL and follow mirror changes.
+# their original URL and follow mirror changes. Like mcurl, it logs in to a
+# Kerberos (SPNEGO) proxy with the user's ticket.
 mgit() {
-  local -a opts
+  local -a opts=(-c http.proxyAuthMethod=negotiate)
   local from to
   while IFS=$'\t' read -r from to; do
     [ -n "$from" ] && opts+=(-c "url.$to.insteadOf=$from")
