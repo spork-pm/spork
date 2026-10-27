@@ -494,7 +494,7 @@ source_of() {
   local name=$1 src drawer
   src=$(receipt "$name" source); drawer=$(receipt "$name" drawer)
   if [ -n "$src" ]; then echo "$src"
-  elif [ -n "$drawer" ] && [ -d "$DRAWERS_DIR/$drawer" ]; then echo "$drawer/$name"
+  elif [ -n "$drawer" ] && [ -f "$(manifest_dir "$DRAWERS_DIR/$drawer")/$name.json" ]; then echo "$drawer/$name"
   else echo "$name"; fi
 }
 
@@ -512,6 +512,14 @@ latest_version() {
 }
 
 # ---------------------------------------------------------------- drawer helpers
+
+# The official drawers, which "spork drawer add <name>" knows without a URL.
+known_drawer_url() {
+  case $1 in
+    main|apps) echo "https://github.com/spork-pm/$1" ;;
+    *) return 1 ;;
+  esac
+}
 
 has_git() {
   local g; g=$(command -v git) || return 1
@@ -665,14 +673,16 @@ cmd_drawer() {
   case $sub in
     add)
       local name=$1 url=$2 d
-      [ -n "$name" ] && [ -n "$url" ] || die "usage: spork drawer add <name> <git-url | github-url | directory>"
+      [ -n "$url" ] || url=$(known_drawer_url "$name") \
+        || die "usage: spork drawer add <name> <git-url | github-url | directory>  (main and apps need no URL)"
       d=$DRAWERS_DIR/$name
       [ -e "$d" ] && die "drawer '$name' already exists"
       mkdir -p "$DRAWERS_DIR"
       if [ -d "$url" ]; then
         ln -s "$(cd "$url" && pwd)" "$d"
       elif has_git; then
-        mgit clone -q --depth 1 "$url" "$d" || die "could not clone $url"
+        mgit clone -q --depth 1 "$url" "$d" \
+          || die "could not clone $url (if your network blocks it, see: spork mirror add)"
       else
         fetch_drawer_tarball "$url" "$d"
       fi
@@ -787,7 +797,7 @@ cmd_doctor() {
   if mkdir -p "$SPORK_APPDIR" 2>/dev/null && [ -w "$SPORK_APPDIR" ]; then say "$SPORK_APPDIR is writable"
   else ok=; warn "$SPORK_APPDIR is not writable"; fi
   if [ -n "$(list_drawers)" ]; then say "Drawers: $(list_drawers | tr '\n' ' ')"
-  else ok=; warn "no drawers. Add one with: spork drawer add <name> <url>"; fi
+  else ok=; warn "no drawers. Add the official ones with: spork drawer add main; spork drawer add apps"; fi
   local m; m=$(mirror_rules | grep -c .)
   [ "$m" -gt 0 ] && say "$m mirror rule(s) in $MIRRORS_FILE"
   if has_git; then say "git is available"
@@ -815,7 +825,7 @@ ${B}Usage:${N} spork <command> [options] [args]
   prefix <pkg>          Print a package's install directory
   which <command>       Show where a command comes from
   hold | unhold <pkg>   Stop / allow updates for a package
-  drawer add <name> <url|dir> | rm <name> | list | update
+  drawer add <name> [url|dir] | rm <name> | list | update
   cache [show | rm [pkg]]
   mirror add <from> <to> | rm <from> | list | test <url>
                         Rewrite download URLs to go through a proxy or mirror
