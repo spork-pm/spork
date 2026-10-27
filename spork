@@ -14,7 +14,7 @@ SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
 SPORK_APPDIR=${SPORK_APPDIR:-$HOME/Applications}
 BIN_DIR=$SPORK_HOME/bin
 APPS_DIR=$SPORK_HOME/apps
-BUCKETS_DIR=$SPORK_HOME/buckets
+DRAWERS_DIR=$SPORK_HOME/drawers
 CACHE_DIR=$SPORK_HOME/cache
 MIRRORS_FILE=${SPORK_MIRRORS_FILE:-$SPORK_HOME/mirrors}
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
@@ -115,43 +115,44 @@ bin_entries() {
   done
 }
 
-# ---------------------------------------------------------------- buckets & manifests
+# ---------------------------------------------------------------- drawers & manifests
 
-manifest_dir() { if [ -d "$1/bucket" ]; then echo "$1/bucket"; else echo "$1"; fi; }
+# Manifests sit in a drawer's "drawer/" folder, or at its top level.
+manifest_dir() { if [ -d "$1/drawer" ]; then echo "$1/drawer"; else echo "$1"; fi; }
 
-list_buckets() {
-  [ -d "$BUCKETS_DIR/main" ] && echo main
+list_drawers() {
+  [ -d "$DRAWERS_DIR/main" ] && echo main
   local d b
-  for d in "$BUCKETS_DIR"/*; do
+  for d in "$DRAWERS_DIR"/*; do
     [ -d "$d" ] || continue
     b=$(basename "$d"); [ "$b" = main ] || echo "$b"
   done
 }
 
-# Find a manifest. Accepts "name", "bucket/name", a path to a .json file or a URL.
-# Sets M_NAME, M_FILE, M_BUCKET and M_SOURCE.
+# Find a manifest. Accepts "name", "drawer/name", a path to a .json file or a URL.
+# Sets M_NAME, M_FILE, M_DRAWER and M_SOURCE.
 resolve() {
   local q=$1 b f
   M_SOURCE= M_FILE=
   case $q in
     http://*|https://*)
-      M_NAME=$(basename "${q%%\?*}" .json); M_BUCKET=url; M_SOURCE=$q
+      M_NAME=$(basename "${q%%\?*}" .json); M_DRAWER=url; M_SOURCE=$q
       M_FILE=$TMP_ROOT/manifest-$M_NAME.json
       mcurl -fsSL -o "$M_FILE" "$q" || die "could not download manifest $(mirror_url "$q")" ;;
     *.json)
       [ -f "$q" ] || die "no such file: $q"
-      M_NAME=$(basename "$q" .json); M_BUCKET=file
+      M_NAME=$(basename "$q" .json); M_DRAWER=file
       M_FILE=$(cd "$(dirname "$q")" && pwd)/$(basename "$q"); M_SOURCE=$M_FILE ;;
     */*)
-      b=${q%%/*}; M_NAME=${q#*/}; M_BUCKET=$b
-      [ -d "$BUCKETS_DIR/$b" ] || die "no bucket named '$b' (see: spork bucket list)"
-      M_FILE=$(manifest_dir "$BUCKETS_DIR/$b")/$M_NAME.json
-      [ -f "$M_FILE" ] || die "no package '$M_NAME' in bucket '$b'" ;;
+      b=${q%%/*}; M_NAME=${q#*/}; M_DRAWER=$b
+      [ -d "$DRAWERS_DIR/$b" ] || die "no drawer named '$b' (see: spork drawer list)"
+      M_FILE=$(manifest_dir "$DRAWERS_DIR/$b")/$M_NAME.json
+      [ -f "$M_FILE" ] || die "no package '$M_NAME' in drawer '$b'" ;;
     *)
       M_NAME=$q
-      for b in $(list_buckets); do
-        f=$(manifest_dir "$BUCKETS_DIR/$b")/$q.json
-        if [ -f "$f" ]; then M_FILE=$f; M_BUCKET=$b; break; fi
+      for b in $(list_drawers); do
+        f=$(manifest_dir "$DRAWERS_DIR/$b")/$q.json
+        if [ -f "$f" ]; then M_FILE=$f; M_DRAWER=$b; break; fi
       done
       [ -n "$M_FILE" ] || die "couldn't find package '$q' (try: spork search $q)" ;;
   esac
@@ -216,7 +217,7 @@ mcurl() {
   curl "$@"
 }
 
-# git with each mirror rule passed as url.<to>.insteadOf=<from>, so buckets keep
+# git with each mirror rule passed as url.<to>.insteadOf=<from>, so drawers keep
 # their original URL and follow mirror changes.
 mgit() {
   local -a opts
@@ -391,7 +392,7 @@ EOF
 
 do_install() {
   resolve "$1"
-  local name=$M_NAME f=$M_FILE bucket=$M_BUCKET source=$M_SOURCE
+  local name=$M_NAME f=$M_FILE drawer=$M_DRAWER source=$M_SOURCE
   local ver pkgdir cur dep i url dl fname cached ed src x dir n
   local -a urls hashes
   ver=$(jget "$f" version)
@@ -409,8 +410,8 @@ do_install() {
   done
 
   pick_arch "$f"
-  if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$bucket]$N"
-  else say "Installing $name $ver ${D}[$bucket, $M_ARCH]$N"; fi
+  if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$drawer]$N"
+  else say "Installing $name $ver ${D}[$drawer, $M_ARCH]$N"; fi
 
   n=0; while IFS= read -r url; do [ -n "$url" ] && urls[n]=$url && n=$((n + 1)); done <<EOF
 $(k=$(mkey "$f" url) && jlist "$f" "$k")
@@ -453,8 +454,8 @@ EOF
 
   mkdir -p "$dir/.spork"
   cp "$f" "$dir/.spork/manifest.json"
-  printf 'bucket=%s\nsource=%s\narch=%s\ninstalled=%s\n' \
-    "$bucket" "$source" "$M_ARCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/.spork/info"
+  printf 'drawer=%s\nsource=%s\narch=%s\ninstalled=%s\n' \
+    "$drawer" "$source" "$M_ARCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/.spork/info"
 
   run_hook "$f" post_install "$dir"
 
@@ -490,10 +491,10 @@ do_uninstall() {
 
 # Where an installed package's manifest comes from now.
 source_of() {
-  local name=$1 src bucket
-  src=$(receipt "$name" source); bucket=$(receipt "$name" bucket)
+  local name=$1 src drawer
+  src=$(receipt "$name" source); drawer=$(receipt "$name" drawer)
   if [ -n "$src" ]; then echo "$src"
-  elif [ -n "$bucket" ] && [ -d "$BUCKETS_DIR/$bucket" ]; then echo "$bucket/$name"
+  elif [ -n "$drawer" ] && [ -d "$DRAWERS_DIR/$drawer" ]; then echo "$drawer/$name"
   else echo "$name"; fi
 }
 
@@ -504,13 +505,13 @@ latest_version() {
   case $q in
     http*) f=$TMP_ROOT/latest-$1.json; mcurl -fsSL -o "$f" "$q" 2>/dev/null || return 1 ;;
     *.json) f=$q ;;
-    */*) f=$(manifest_dir "$BUCKETS_DIR/${q%%/*}")/$1.json ;;
-    *) for b in $(list_buckets); do f=$(manifest_dir "$BUCKETS_DIR/$b")/$1.json; [ -f "$f" ] && break; done ;;
+    */*) f=$(manifest_dir "$DRAWERS_DIR/${q%%/*}")/$1.json ;;
+    *) for b in $(list_drawers); do f=$(manifest_dir "$DRAWERS_DIR/$b")/$1.json; [ -f "$f" ] && break; done ;;
   esac
   [ -f "$f" ] && jget "$f" version
 }
 
-# ---------------------------------------------------------------- bucket helpers
+# ---------------------------------------------------------------- drawer helpers
 
 has_git() {
   local g; g=$(command -v git) || return 1
@@ -529,30 +530,30 @@ tarball_url() {
   esac
 }
 
-fetch_bucket_tarball() {
+fetch_drawer_tarball() {
   local url=$1 dest=$2 t tmp
   t=$(tarball_url "$url") || die "git isn't available and '$url' isn't a GitHub or .tar.gz URL"
-  tmp=$TMP_ROOT/bucket-$RANDOM; mkdir -p "$tmp"
-  mcurl -fsSL "$t" | tar -xzf - -C "$tmp" --strip-components 1 || die "could not download bucket from $(mirror_url "$t")"
+  tmp=$TMP_ROOT/drawer-$RANDOM; mkdir -p "$tmp"
+  mcurl -fsSL "$t" | tar -xzf - -C "$tmp" --strip-components 1 || die "could not download drawer from $(mirror_url "$t")"
   rm -rf "$dest" && mv "$tmp" "$dest" && echo "$url" > "$dest/.spork-source"
 }
 
-bucket_kind() {
-  local d=$BUCKETS_DIR/$1
+drawer_kind() {
+  local d=$DRAWERS_DIR/$1
   if [ -L "$d" ]; then echo "link -> $(readlink "$d")"
   elif [ -d "$d/.git" ]; then echo "git $(git -C "$d" remote get-url origin 2>/dev/null)"
   elif [ -f "$d/.spork-source" ]; then echo "download $(cat "$d/.spork-source")"
   else echo local; fi
 }
 
-update_bucket() {
-  local b=$1 d=$BUCKETS_DIR/$1
+update_drawer() {
+  local b=$1 d=$DRAWERS_DIR/$1
   if [ -L "$d" ]; then return 0
   elif [ -d "$d/.git" ]; then
     has_git || { warn "can't update '$b': git is not available"; return 0; }
-    note "updating bucket $b"; mgit -C "$d" pull --ff-only -q || warn "could not update bucket $b"
+    note "updating drawer $b"; mgit -C "$d" pull --ff-only -q || warn "could not update drawer $b"
   elif [ -f "$d/.spork-source" ]; then
-    note "updating bucket $b"; ( fetch_bucket_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update bucket $b"
+    note "updating drawer $b"; ( fetch_drawer_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update drawer $b"
   fi
 }
 
@@ -576,8 +577,8 @@ cmd_uninstall() {
 cmd_update() {
   local name cur new failed=0 all=
   if [ $# -eq 0 ]; then
-    say "Updating buckets"
-    for b in $(list_buckets); do update_bucket "$b"; done
+    say "Updating drawers"
+    for b in $(list_drawers); do update_drawer "$b"; done
     cmd_status; return 0
   fi
   if [ "$1" = --all ] || [ "$1" = '*' ]; then all=1; set -- $(installed_list); fi
@@ -611,8 +612,8 @@ cmd_status() {
 cmd_list() {
   local name any=
   for name in $(installed_list); do
-    [ -z "$any" ] && printf '%s%-24s %-16s %s%s\n' "$B" Name Version Bucket "$N" && any=1
-    printf '%-24s %-16s %s%s\n' "$name" "$(installed_version "$name")" "$(receipt "$name" bucket)" \
+    [ -z "$any" ] && printf '%s%-24s %-16s %s%s\n' "$B" Name Version Drawer "$N" && any=1
+    printf '%-24s %-16s %s%s\n' "$name" "$(installed_version "$name")" "$(receipt "$name" drawer)" \
       "$([ -f "$APPS_DIR/$name/.hold" ] && echo " (held)")"
   done
   [ -n "$any" ] || say "Nothing installed yet. Try: spork search"
@@ -620,8 +621,8 @@ cmd_list() {
 
 cmd_search() {
   local q=$1 b d f name hits found=
-  for b in $(list_buckets); do
-    d=$(manifest_dir "$BUCKETS_DIR/$b")
+  for b in $(list_drawers); do
+    d=$(manifest_dir "$DRAWERS_DIR/$b")
     # Match on file name first, then on file contents (cheap), then read only the hits.
     if [ -n "$q" ]; then
       hits=$( { ls "$d" | grep '\.json$' | sed 's/\.json$//' | grep -i -- "$q" | sed "s|.*|$d/&.json|"
@@ -630,7 +631,7 @@ cmd_search() {
       hits=$(ls "$d"/*.json 2>/dev/null)
     fi
     [ -n "$hits" ] || continue
-    printf '%s%s bucket:%s\n' "$C" "$b" "$N"; found=1
+    printf '%s%s drawer:%s\n' "$C" "$b" "$N"; found=1
     while IFS= read -r f; do
       name=$(basename "$f" .json)
       printf '    %s%-22s%s %-12s %s\n' "$B" "$name" "$N" "$(jget "$f" version)" "$(jget "$f" description)"
@@ -650,7 +651,7 @@ cmd_info() {
   for v in description version homepage license; do
     jhas "$f" "$v" && printf '%s%-12s%s %s\n' "$B" "$(echo "$v" | awk '{print toupper(substr($0,1,1)) substr($0,2)}'):" "$N" "$(jget "$f" "$v")"
   done
-  printf '%sBucket:%s      %s\n' "$B" "$N" "$M_BUCKET"
+  printf '%sDrawer:%s      %s\n' "$B" "$N" "$M_DRAWER"
   cur=$(installed_version "$M_NAME")
   printf '%sInstalled:%s   %s\n' "$B" "$N" "${cur:-no}"
   v=$(bin_entries "$f" | cut -f2 | tr '\n' ' '); [ -n "${v% }" ] && printf '%sCommands:%s    %s\n' "$B" "$N" "$v"
@@ -659,36 +660,36 @@ cmd_info() {
   return 0
 }
 
-cmd_bucket() {
+cmd_drawer() {
   local sub=$1; shift
   case $sub in
     add)
       local name=$1 url=$2 d
-      [ -n "$name" ] && [ -n "$url" ] || die "usage: spork bucket add <name> <git-url | github-url | directory>"
-      d=$BUCKETS_DIR/$name
-      [ -e "$d" ] && die "bucket '$name' already exists"
-      mkdir -p "$BUCKETS_DIR"
+      [ -n "$name" ] && [ -n "$url" ] || die "usage: spork drawer add <name> <git-url | github-url | directory>"
+      d=$DRAWERS_DIR/$name
+      [ -e "$d" ] && die "drawer '$name' already exists"
+      mkdir -p "$DRAWERS_DIR"
       if [ -d "$url" ]; then
         ln -s "$(cd "$url" && pwd)" "$d"
       elif has_git; then
         mgit clone -q --depth 1 "$url" "$d" || die "could not clone $url"
       else
-        fetch_bucket_tarball "$url" "$d"
+        fetch_drawer_tarball "$url" "$d"
       fi
-      say "Added bucket '$name' ($(ls "$(manifest_dir "$d")"/*.json 2>/dev/null | wc -l | tr -d ' ') packages)" ;;
+      say "Added drawer '$name' ($(ls "$(manifest_dir "$d")"/*.json 2>/dev/null | wc -l | tr -d ' ') packages)" ;;
     rm|remove)
-      [ -n "$1" ] || die "usage: spork bucket rm <name>"
-      [ -e "$BUCKETS_DIR/$1" ] || die "no bucket named '$1'"
-      rm -rf "$BUCKETS_DIR/$1"; say "Removed bucket '$1'" ;;
+      [ -n "$1" ] || die "usage: spork drawer rm <name>"
+      [ -e "$DRAWERS_DIR/$1" ] || die "no drawer named '$1'"
+      rm -rf "$DRAWERS_DIR/$1"; say "Removed drawer '$1'" ;;
     list|ls|'')
       local b
-      for b in $(list_buckets); do
+      for b in $(list_drawers); do
         printf '%s%-12s%s %4s packages  %s%s%s\n' "$B" "$b" "$N" \
-          "$(ls "$(manifest_dir "$BUCKETS_DIR/$b")"/*.json 2>/dev/null | wc -l | tr -d ' ')" "$D" "$(bucket_kind "$b")" "$N"
+          "$(ls "$(manifest_dir "$DRAWERS_DIR/$b")"/*.json 2>/dev/null | wc -l | tr -d ' ')" "$D" "$(drawer_kind "$b")" "$N"
       done ;;
     update)
-      local b; for b in ${@:-$(list_buckets)}; do update_bucket "$b"; done ;;
-    *) die "usage: spork bucket [add|rm|list|update]" ;;
+      local b; for b in ${@:-$(list_drawers)}; do update_drawer "$b"; done ;;
+    *) die "usage: spork drawer [add|rm|list|update]" ;;
   esac
 }
 
@@ -785,12 +786,12 @@ cmd_doctor() {
   case ":$PATH:" in *":$BIN_DIR:"*) say "PATH includes $BIN_DIR" ;; *) ok=; path_hint ;; esac
   if mkdir -p "$SPORK_APPDIR" 2>/dev/null && [ -w "$SPORK_APPDIR" ]; then say "$SPORK_APPDIR is writable"
   else ok=; warn "$SPORK_APPDIR is not writable"; fi
-  if [ -n "$(list_buckets)" ]; then say "Buckets: $(list_buckets | tr '\n' ' ')"
-  else ok=; warn "no buckets. Add one with: spork bucket add <name> <url>"; fi
+  if [ -n "$(list_drawers)" ]; then say "Drawers: $(list_drawers | tr '\n' ' ')"
+  else ok=; warn "no drawers. Add one with: spork drawer add <name> <url>"; fi
   local m; m=$(mirror_rules | grep -c .)
   [ "$m" -gt 0 ] && say "$m mirror rule(s) in $MIRRORS_FILE"
   if has_git; then say "git is available"
-  else note "git not found: buckets will be downloaded as archives (GitHub only)"; fi
+  else note "git not found: drawers will be downloaded as archives (GitHub only)"; fi
   [ "$ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd && note "Rosetta 2 is not running; Intel-only packages won't start"
   [ -n "$ok" ] && say "All good"
 }
@@ -801,20 +802,20 @@ ${B}spork $SPORK_VERSION${N} - install apps and tools on macOS without admin rig
 
 ${B}Usage:${N} spork <command> [options] [args]
 
-  install <pkg>...      Install packages (name, bucket/name, ./file.json or URL)
+  install <pkg>...      Install packages (name, drawer/name, ./file.json or URL)
   uninstall <pkg>...    Remove packages and their apps/commands
-  update                Update buckets, then show available updates
+  update                Update drawers, then show available updates
   update <pkg>...       Update packages (--all for everything)
   status                Show packages with updates available
   list                  List installed packages
-  search [query]        Search buckets
+  search [query]        Search drawers
   info <pkg>            Show package details
   cat <pkg>             Print a package's manifest
   home <pkg>            Open a package's homepage
   prefix <pkg>          Print a package's install directory
   which <command>       Show where a command comes from
   hold | unhold <pkg>   Stop / allow updates for a package
-  bucket add <name> <url|dir> | rm <name> | list | update
+  drawer add <name> <url|dir> | rm <name> | list | update
   cache [show | rm [pkg]]
   mirror add <from> <to> | rm <from> | list | test <url>
                         Rewrite download URLs to go through a proxy or mirror
@@ -855,7 +856,7 @@ case $cmd in
   which)          cmd_which "$1" ;;
   hold)           HOLD=1 cmd_hold "$@" ;;
   unhold)         HOLD=0 cmd_hold "$@" ;;
-  bucket)         cmd_bucket "$@" ;;
+  drawer)         cmd_drawer "$@" ;;
   cache)          cmd_cache "$@" ;;
   hash)           cmd_hash "$1" ;;
   mirror|mirrors) cmd_mirror "$@" ;;
