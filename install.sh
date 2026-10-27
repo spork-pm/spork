@@ -5,20 +5,27 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
+export SPORK_HOME
 
 mkdir -p "$SPORK_HOME/libexec" "$SPORK_HOME/bin" "$SPORK_HOME/drawers" "$HOME/Applications"
 cp "$here/spork" "$SPORK_HOME/libexec/spork"
 chmod +x "$SPORK_HOME/libexec/spork"
 ln -sfn "$SPORK_HOME/libexec/spork" "$SPORK_HOME/bin/spork"
 
-# The bundled "main" drawer. Leave it alone if the user pointed main elsewhere.
-main=$SPORK_HOME/drawers/main
-if [ ! -e "$main" ] || { [ ! -L "$main" ] && [ ! -d "$main/.git" ] && [ ! -f "$main/.spork-source" ]; }; then
-  rm -rf "$main"; mkdir -p "$main"
-  cp -R "$here/drawer" "$main/drawer"
-fi
-
 echo "spork installed in $SPORK_HOME"
+
+# The official drawers: main (CLI tools) and apps (GUI apps). A drawer that's a
+# plain folder is a copy from older spork versions, so it's replaced. Drawers
+# that are links, git clones or downloads are left alone.
+for name in main apps; do
+  d=$SPORK_HOME/drawers/$name
+  if [ -e "$d" ] && { [ -L "$d" ] || [ -d "$d/.git" ] || [ -f "$d/.spork-source" ]; }; then
+    continue
+  fi
+  rm -rf "$d"
+  "$SPORK_HOME/bin/spork" drawer add "$name" \
+    || echo "Couldn't add the '$name' drawer. Set up mirrors if needed (spork mirror add), then run: spork drawer add $name"
+done
 
 line='eval "$('"$SPORK_HOME"'/bin/spork shellenv)"'
 case "$1:${SHELL##*/}" in

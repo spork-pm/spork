@@ -14,15 +14,16 @@ A [Scoop](https://scoop.sh)-style package manager for macOS that works without a
 ./install.sh
 ```
 
-This copies spork to `~/.spork`, sets up the bundled `main` drawer, and adds this line to
-`~/.zshrc` (or `~/.bash_profile`):
+This copies spork to `~/.spork`, adds the official `main` and `apps` drawers (see
+[Drawers](#drawers)), and adds this line to `~/.zshrc` (or `~/.bash_profile`):
 
 ```bash
 eval "$(~/.spork/bin/spork shellenv)"
 ```
 
 Pass `--no-modify-path` to skip editing your shell file. Set `SPORK_HOME` or `SPORK_APPDIR`
-to use different folders.
+to use different folders. If your network blocks GitHub, set up [mirrors](#mirrors-and-proxies)
+first (or point `SPORK_MIRRORS_FILE` at a shared rules file), then run the installer.
 
 ## Usage
 
@@ -59,7 +60,16 @@ deleted after an update.
 ## Drawers
 
 A drawer is a folder or git repo of JSON manifests, in a `drawer/` subfolder or at the top level.
-It's what Scoop calls a bucket.
+It's what Scoop calls a bucket. The installer adds the two official drawers:
+
+| Drawer | Contents |
+|---|---|
+| [`main`](https://github.com/spork-pm/main) | Command-line tools, linked into `~/.spork/bin` |
+| [`apps`](https://github.com/spork-pm/apps) | GUI apps, installed into `~/Applications` |
+
+To add them again later, run `spork drawer add main` or `spork drawer add apps` (no URL needed).
+When several drawers have a package with the same name, `main` wins, then the others in
+alphabetical order. Use `drawer/package` to pick one.
 
 ```bash
 spork drawer add work https://github.com/your-org/spork-drawer  # git, or a tarball download if git is missing
@@ -107,7 +117,8 @@ Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.
 (mounted read-only, contents copied), `.pkg` (payload unpacked; its installer scripts are **not**
 run), `.gz`, and plain binaries.
 
-Look at [drawer/](drawer/) for working examples (ripgrep, fd, jq, Rectangle, Headlamp).
+Look at the [main](https://github.com/spork-pm/main/tree/main/drawer) and
+[apps](https://github.com/spork-pm/apps/tree/main/drawer) drawers for working examples.
 
 ## Mirrors and proxies
 
