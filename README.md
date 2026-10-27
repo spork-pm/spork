@@ -223,5 +223,6 @@ security add-internet-password -s artifactory.example.com -a your.name -w
 - Apps that insist on living in `/Applications`, or that install privileged helpers or kernel/system
   extensions, need an admin.
 - Version checks compare strings: any change in a drawer's `version` counts as an update.
-- Downloads use `curl`, so HTTP proxies work through `https_proxy` / `HTTPS_PROXY`. For
+- Downloads use `curl`, so HTTP proxies work through `https_proxy` / `HTTPS_PROXY`. Proxies that
+  ask for Kerberos get your ticket automatically, for curl and git alike (run `kinit` first). For
   mirrors that need different URLs, see [Mirrors and proxies](#mirrors-and-proxies).

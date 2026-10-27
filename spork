@@ -259,17 +259,23 @@ curl_user_config() {
 }
 
 # curl through the mirror rules. The URL must be the last argument.
+# --proxy-negotiate lets curl log in to a Kerberos (SPNEGO) proxy with the
+# user's ticket; it does nothing when no proxy is set or the proxy doesn't ask.
 mcurl() {
   local n=$# url real
   url=${!n}
   real=$(mirror_url "$url")
-  set -- "${@:1:$((n - 1))}" "$real"
+  set -- --proxy-negotiate "${@:1:$((n - 1))}" "$real"
   if [ "$real" != "$url" ] && mirror_creds "$(url_host "$real")"; then
     curl -K - "$@" <<<"$(curl_user_config "$CRED_USER" "$CRED_PASS")"
   else
     curl "$@"
   fi
 }
+
+# git for network calls. Like mcurl, it logs in to a Kerberos (SPNEGO) proxy
+# with the user's ticket.
+netgit() { git -c http.proxyAuthMethod=negotiate "$@"; }
 
 # ---------------------------------------------------------------- download, verify, extract
 
@@ -719,7 +725,7 @@ update_drawer() {
   if [ -L "$d" ]; then return 0
   elif [ -d "$d/.git" ]; then
     has_git || { warn "can't update '$b': git is not available"; return 0; }
-    note "updating drawer $b"; git -C "$d" pull --ff-only -q || warn "could not update drawer $b"
+    note "updating drawer $b"; netgit -C "$d" pull --ff-only -q || warn "could not update drawer $b"
   elif [ -f "$d/.spork-source" ]; then
     note "updating drawer $b"; ( fetch_drawer_tarball "$(cat "$d/.spork-source")" "$d" ) || warn "could not update drawer $b"
   fi
@@ -843,7 +849,7 @@ cmd_drawer() {
       if [ -d "$url" ]; then
         ln -s "$(cd "$url" && pwd)" "$d"
       elif has_git; then
-        git clone -q --depth 1 "$url" "$d" \
+        netgit clone -q --depth 1 "$url" "$d" \
           || die "could not clone $url"
       else
         fetch_drawer_tarball "$url" "$d"
