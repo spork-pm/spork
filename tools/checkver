@@ -183,18 +183,15 @@ def version_vars(version, groups):
 
 
 def substitute(value, variables):
-    """Replace $name in strings (recursively in lists and dicts). Unknown names stay as they are,
-    so hook variables like $dir are left alone. Longest names win: $versionX isn't $version."""
+    """Replace $name in strings (recursively in lists and dicts), ignoring case. Only known names
+    are replaced, longest first, so "gh_$version_macOS" works and hook variables like $dir stay."""
     if isinstance(value, str):
         lower = {k.lower(): v for k, v in variables.items()}
-
-        def repl(m):
-            name = m.group(1)
-            if name in variables:
-                return variables[name]
-            return lower.get(name.lower(), m.group(0))
-
-        return re.sub(r"\$([A-Za-z_]\w*)", repl, value)
+        names = sorted(variables, key=len, reverse=True)
+        if not names:
+            return value
+        pattern = r"\$(%s)" % "|".join(re.escape(n) for n in names)
+        return re.sub(pattern, lambda m: lower[m.group(1).lower()], value, flags=re.IGNORECASE)
     if isinstance(value, list):
         return [substitute(x, variables) for x in value]
     if isinstance(value, dict):

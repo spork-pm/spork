@@ -37,6 +37,8 @@ class Versions(unittest.TestCase):
         v = cv.version_vars("1.2.3", {})
         self.assertEqual(cv.substitute("a/$version/$majorVersion.x/$dir", v), "a/1.2.3/1.x/$dir")
         self.assertEqual(cv.substitute("$VERSION", v), "1.2.3")
+        self.assertEqual(cv.substitute("gh_$version_macOS.zip", v), "gh_1.2.3_macOS.zip")
+        self.assertEqual(cv.substitute("$majorVersion$minorVersion", v), "12")
         self.assertEqual(cv.substitute(["$version", {"k": "$minorVersion"}], v), ["1.2.3", {"k": "2"}])
 
 
