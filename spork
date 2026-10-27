@@ -215,26 +215,82 @@ EOF
   if [ -n "$best" ]; then echo "$best_to${url#"$best"}"; else echo "$url"; fi
 }
 
+# ---------------------------------------------------------------- mirror logins
+#
+# Mirrors behind a login (Artifactory, Nexus, ...) get HTTP basic auth when the
+# login keychain has an internet password for the mirror's host. Only URLs that a
+# mirror rule rewrote get credentials, so nothing is sent to the original sites.
+# The password never appears on a command line: curl reads it from stdin and git
+# from its environment. SPORK_KEYCHAIN=0 turns this off.
+
+url_host() { local h=${1#*://}; h=${h%%/*}; h=${h##*@}; echo "${h%%:*}"; }
+
+# The account stored for a host. Reading it doesn't touch the password, so the
+# keychain never asks for permission here.
+keychain_account() {
+  [ "${SPORK_KEYCHAIN:-1}" != 0 ] && [ -n "$1" ] || return 1
+  command -v security >/dev/null 2>&1 || return 1
+  security find-internet-password -s "$1" 2>/dev/null \
+    | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1 | grep .
+}
+
+# Sets CRED_USER and CRED_PASS for a host, or fails when the keychain has no
+# login for it. Results are remembered so each host is looked up once per run.
+KC_HOST= KC_USER= KC_PASS= KC_MISS=' '
+mirror_creds() {
+  local host=$1
+  CRED_USER= CRED_PASS=
+  [ -n "$host" ] || return 1
+  case $KC_MISS in *" $host "*) return 1 ;; esac
+  if [ "$host" != "$KC_HOST" ]; then
+    KC_USER=$(keychain_account "$host") \
+      && KC_PASS=$(security find-internet-password -s "$host" -a "$KC_USER" -w 2>/dev/null) \
+      || { KC_MISS="$KC_MISS$host "; return 1; }
+    KC_HOST=$host
+  fi
+  CRED_USER=$KC_USER CRED_PASS=$KC_PASS
+}
+
+# A curl config line holding the login, quoted for curl's config syntax.
+curl_user_config() {
+  # sed, because bash 3.2 mangles backslashes in ${s//...} replacements.
+  printf 'user = "%s"\n' "$(printf '%s' "$1:$2" | sed 's/[\\"]/\\&/g')"
+}
+
 # curl through the mirror rules. The URL must be the last argument.
 mcurl() {
-  local n=$# url
+  local n=$# url real
   url=${!n}
-  set -- "${@:1:$((n - 1))}" "$(mirror_url "$url")"
-  curl "$@"
+  real=$(mirror_url "$url")
+  set -- "${@:1:$((n - 1))}" "$real"
+  if [ "$real" != "$url" ] && mirror_creds "$(url_host "$real")"; then
+    curl -K - "$@" <<<"$(curl_user_config "$CRED_USER" "$CRED_PASS")"
+  else
+    curl "$@"
+  fi
 }
 
 # git with each mirror rule passed as url.<to>.insteadOf=<from>, so drawers keep
-# their original URL and follow mirror changes.
-mgit() {
+# their original URL and follow mirror changes. Mirrors with a keychain login get
+# an Authorization header through GIT_CONFIG_* variables, kept off the command line
+# and inside this subshell so hooks and later commands never see it.
+mgit() (
   local -a opts
-  local from to
+  local from to i=${GIT_CONFIG_COUNT:-0} auth
   while IFS=$'\t' read -r from to; do
-    [ -n "$from" ] && opts+=(-c "url.$to.insteadOf=$from")
+    [ -n "$from" ] || continue
+    opts+=(-c "url.$to.insteadOf=$from")
+    if mirror_creds "$(url_host "$to")"; then
+      auth=$(printf '%s:%s' "$CRED_USER" "$CRED_PASS" | base64 | tr -d '\n')
+      export "GIT_CONFIG_KEY_$i=http.$to.extraHeader" "GIT_CONFIG_VALUE_$i=Authorization: Basic $auth"
+      i=$((i + 1))
+    fi
   done <<EOF
 $(mirror_rules)
 EOF
+  [ "$i" -gt "${GIT_CONFIG_COUNT:-0}" ] && export GIT_CONFIG_COUNT=$i
   git "${opts[@]}" "$@"
-}
+)
 
 # ---------------------------------------------------------------- download, verify, extract
 
@@ -243,9 +299,12 @@ fetch() {
   if [ -f "$out" ]; then note "using cached $(basename "$out")"; return 0; fi
   real=$(mirror_url "$url")
   say "Downloading $url"
-  [ "$real" != "$url" ] && note "via mirror $real"
+  if [ "$real" != "$url" ]; then
+    if mirror_creds "$(url_host "$real")"; then note "via mirror $real (as $CRED_USER)"
+    else note "via mirror $real"; fi
+  fi
   [ -t 2 ] && progress=--progress-bar
-  curl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$real" \
+  mcurl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$url" \
     || { rm -f "$out.part"; die "download failed: $real"; }
   mv "$out.part" "$out"
 }
@@ -864,10 +923,11 @@ cmd_mirror() {
       mirror_rules | cut -f1 | grep -qxF -- "$1" || die "no mirror rule for $1"
       mirror_remove "$1"; say "Removed the mirror rule for $1" ;;
     list|ls|'')
-      local from to any=
+      local from to any= acct
       while IFS=$'\t' read -r from to; do
         [ -n "$from" ] || continue
         printf '%s\n    %s-> %s%s\n' "$from" "$D" "$N" "$to"; any=1
+        acct=$(keychain_account "$(url_host "$to")") && note "   login: $acct (from the keychain)"
       done <<EOF
 $(mirror_rules)
 EOF
@@ -933,6 +993,10 @@ cmd_doctor() {
   else ok=; warn "no drawers. Add the official ones with: spork drawer add main; spork drawer add apps"; fi
   local m; m=$(mirror_rules | grep -c .)
   [ "$m" -gt 0 ] && say "$m mirror rule(s) in $MIRRORS_FILE"
+  local h acct
+  for h in $(mirror_rules | cut -f2 | while IFS= read -r t; do url_host "$t"; done | sort -u); do
+    acct=$(keychain_account "$h") && say "Mirror $h: logging in as $acct (from the keychain)"
+  done
   if has_git; then say "git is available"
   else note "git not found: drawers will be downloaded as archives (GitHub only)"; fi
   [ "$ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd && note "Rosetta 2 is not running; Intel-only packages won't start"
