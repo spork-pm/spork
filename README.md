@@ -98,6 +98,7 @@ You can also install straight from a manifest: `spork install ./foo.json` or
     "app": "Foo.app",
     "depends": ["bar"],
     "persist": ["data", ["conf/settings.ini", "settings.ini"]],
+    "env_add_path": ["tools", "$persist_dir/data/bin"],
     "pre_install": "…shell…",
     "post_install": ["…shell…", "…"],
     "pre_uninstall": "…shell…",
@@ -115,7 +116,8 @@ You can also install straight from a manifest: `spork install ./foo.json` or
 | `app` | `.app` bundle(s) to move into `~/Applications`. |
 | `depends` | Packages to install first. |
 | `persist` | Files or folders inside the package that hold user data: `"path"`, or a list of `"path"` / `["path", "name"]`. See [Persisted data](#persisted-data). |
-| hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$bindir`, `$arch` set. |
+| `env_add_path` | Extra folders to put on `PATH`, for tools that install their own commands. See [Extra PATH folders](#extra-path-folders). |
+| hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$bindir`, `$arch` and `$persist_dir` (the package's [persisted data](#persisted-data) folder) set. |
 
 Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.zst`, `.dmg`
 (mounted read-only, contents copied), `.pkg` (payload unpacked; its installer scripts are **not**
@@ -147,6 +149,24 @@ in the package folder:
 
 Paths are relative to the package folder (after `extract_dir`). Paths inside an `.app` bundle
 aren't allowed: apps keep their data in `~/Library`, and changing a bundle breaks its signature.
+
+## Extra PATH folders
+
+Most packages only need `bin`, which links commands into `~/.spork/bin`. Some tools create
+commands of their own later, like `npm install -g` with Node.js. List the folders those commands
+land in under `env_add_path`:
+
+```json
+"env_add_path": ["tools", "$persist_dir/global/bin"]
+```
+
+- Plain entries are relative to the package folder. spork adds them through `current`, so they
+  keep working after updates. `"."` means the package folder itself.
+- Entries starting with `$persist_dir` point into the package's [persisted data](#persisted-data)
+  folder, `~/.spork/persist/<pkg>/`. The folder doesn't need to exist yet.
+- `spork shellenv` puts these folders on `PATH` after `~/.spork/bin`. The shell picks them up when
+  it starts, so after installing such a package, open a new terminal or run
+  `eval "$(spork shellenv)"`. Uninstalling the package removes them the same way.
 
 ## Mirrors and proxies
 

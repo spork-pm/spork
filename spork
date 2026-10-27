@@ -309,14 +309,15 @@ extract() {
 }
 
 # Run an install/uninstall hook from the manifest. Hooks see $dir, $version,
-# $appdir, $bindir and $arch.
+# $appdir, $bindir, $arch and $persist_dir.
 run_hook() {
   local f=$1 hook=$2 dir=$3 script
   script=$(jlist "$f" "$hook")
   [ -n "$script" ] || return 0
   note "running $hook"
   ( cd "$dir" && dir=$dir version=$(jget "$f" version) appdir=$SPORK_APPDIR bindir=$BIN_DIR arch=$M_ARCH \
-      bash -ec "export dir version appdir bindir arch; $script" ) || die "$hook failed"
+      persist_dir=$PERSIST_DIR/$(basename "$(dirname "$dir")") \
+      bash -ec "export dir version appdir bindir arch persist_dir; $script" ) || die "$hook failed"
 }
 
 # ---------------------------------------------------------------- linking
@@ -452,6 +453,35 @@ $(persist_entries "$f")
 EOF
 }
 
+# ---------------------------------------------------------------- extra PATH folders
+
+# Print the absolute folder for each "env_add_path" entry. Entries are relative
+# to the package folder (through "current", so they survive updates), or start
+# with $persist_dir for the package's saved-data folder. Run it in the current
+# shell (not in $(...)) when a bad entry should stop the install.
+resolve_paths() {
+  local name=$1 f=$2 k p base rel
+  k=$(mkey "$f" env_add_path) || return 0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case $p in
+      '$persist_dir')   base=$PERSIST_DIR/$name; rel= ;;
+      '$persist_dir/'*) base=$PERSIST_DIR/$name; rel=${p#\$persist_dir/} ;;
+      *)                base=$APPS_DIR/$name/current; rel=$p ;;
+    esac
+    rel=${rel%/}; [ "$rel" = . ] && rel=
+    case $rel in
+      /*) die "env_add_path '$p' must be relative to the package folder or start with \$persist_dir" ;;
+    esac
+    case "/$rel/" in
+      */../*|*/./*) die "env_add_path '$p' must stay inside the package" ;;
+    esac
+    echo "$base${rel:+/$rel}"
+  done <<EOF
+$(jlist "$f" "$k")
+EOF
+}
+
 # ---------------------------------------------------------------- install / uninstall
 
 do_install() {
@@ -480,6 +510,7 @@ do_install() {
   done <<EOF
 $(persist_entries "$f")
 EOF
+  resolve_paths "$name" "$f" >/dev/null
   if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$drawer]$N"
   else say "Installing $name $ver ${D}[$drawer, $M_ARCH]$N"; fi
 
@@ -522,6 +553,8 @@ EOF
   unlink_bins "$name"
   ln -sfn "$ver" "$pkgdir/current"
   link_bins "$name" "$f"
+  resolve_paths "$name" "$f" > "$pkgdir/.spork-paths"
+  [ -s "$pkgdir/.spork-paths" ] || rm -f "$pkgdir/.spork-paths"
 
   mkdir -p "$dir/.spork"
   cp "$f" "$dir/.spork/manifest.json"
@@ -536,6 +569,14 @@ EOF
   done
 
   say "${B}$name $ver$N installed"
+  if [ -f "$pkgdir/.spork-paths" ]; then
+    local p missing=
+    while IFS= read -r p; do
+      note "adds $p to PATH"
+      case ":$PATH:" in *":$p:"*) ;; *) missing=1 ;; esac
+    done < "$pkgdir/.spork-paths"
+    [ -n "$missing" ] && note "open a new terminal, or run: eval \"\$(spork shellenv)\""
+  fi
   local notes; notes=$(k=$(mkey "$f" notes) && jlist "$f" "$k")
   [ -n "$notes" ] && printf '%sNotes:%s\n%s\n' "$C" "$N" "$(printf '%s\n' "$notes" | sed 's/^/    /')"
   return 0
@@ -747,6 +788,7 @@ cmd_info() {
   v=$(k=$(mkey "$f" app) && jlist "$f" "$k" | tr '\n' ' '); [ -n "${v% }" ] && printf '%sApps:%s        %s\n' "$B" "$N" "$v"
   v=$(jlist "$f" depends | tr '\n' ' '); [ -n "${v% }" ] && printf '%sDepends:%s     %s\n' "$B" "$N" "$v"
   [ -d "$PERSIST_DIR/$M_NAME" ] && printf '%sSaved data:%s  %s\n' "$B" "$N" "$PERSIST_DIR/$M_NAME"
+  v=$(resolve_paths "$M_NAME" "$f" 2>/dev/null | tr '\n' ' '); [ -n "${v% }" ] && printf '%sAdds to PATH:%s %s\n' "$B" "$N" "$v"
   return 0
 }
 
@@ -859,10 +901,19 @@ cmd_which() {
   echo "$(readlink "$l")${o:+  ($o)}"
 }
 
+# PATH gets $BIN_DIR first, then the folders installed packages asked for
+# with "env_add_path".
 cmd_shellenv() {
+  local dirs=$BIN_DIR name p
+  for name in $(installed_list); do
+    [ -f "$APPS_DIR/$name/.spork-paths" ] || continue
+    while IFS= read -r p; do
+      [ -n "$p" ] && dirs="$dirs:$p"
+    done < "$APPS_DIR/$name/.spork-paths"
+  done
   case ${SHELL##*/} in
-    fish) echo "fish_add_path -g \"$BIN_DIR\"" ;;
-    *)    echo "export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    fish) echo "fish_add_path -g $(printf '%s\n' "$dirs" | tr ':' '\n' | sed 's/.*/"&"/' | tr '\n' ' ')" ;;
+    *)    echo "export PATH=\"$dirs:\$PATH\"" ;;
   esac
 }
 
