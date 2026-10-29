@@ -15,3 +15,16 @@ jobs:
           python-version: "3.x"
       - name: Unit tests
         run: python3 -m unittest discover -s tools/tests -v
+
+  spork:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]   # Apple silicon and Intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check syntax
+        run: bash -n spork && bash -n install.sh
+      - name: End-to-end tests
+        run: python3 -m unittest discover -s tests -v
