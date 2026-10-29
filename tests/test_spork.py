@@ -610,6 +610,23 @@ class SporkTest(unittest.TestCase):
         self.spork("cache", "rm", "hello")
         self.assertIn("Cache is empty", self.spork("cache").stdout)
 
+    def test_cleanup(self):
+        self.publish_tool("hello", "1.0")
+        self.publish_tool("other", "1.0")
+        self.spork("install", "hello", "other")
+        cache = self.spork_home / "cache"
+        (cache / "hello#2.0#hello-2.0.tar.gz.part").write_text("partial")
+
+        out = self.spork("cleanup", "hello").stdout
+        self.assertIn("Removed 2 cached file(s)", out)
+        self.assertEqual([p.name for p in cache.iterdir()], ["other#1.0#other-1.0.tar.gz"])
+
+        self.assertIn("Removed 1 cached file(s)", self.spork("cleanup").stdout)
+        self.assertTrue(cache.is_dir(), "cache folder should be kept")
+        self.assertEqual(list(cache.iterdir()), [])
+        self.assertIn("Nothing to clean up", self.spork("cleanup").stdout)
+        self.assertEqual(self.run_cmd("hello"), "hello 1.0")  # installed packages untouched
+
     def test_hash_command(self):
         f = self.build / "x"; f.write_text("hi")
         expect = "sha256:" + sha256(f)

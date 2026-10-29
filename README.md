@@ -37,6 +37,7 @@ spork update --all         # update everything
 spork uninstall rectangle
 spork uninstall --purge mytool  # also delete the tool's saved data (see "persist" below)
 spork hold jq              # pin a version (spork unhold jq to undo)
+spork cleanup              # delete cached downloads (spork cleanup jq for just one package)
 spork doctor               # check PATH, folders, drawers
 ```
 

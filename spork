@@ -871,16 +871,39 @@ cmd_drawer() {
   esac
 }
 
+# Deletes everything in the cache folder, or only the given packages' downloads
+# (including half-finished .part files). The folder itself is kept.
+cmd_cleanup() {
+  local pats=() p n before freed
+  if [ $# -eq 0 ] || [ "$1" = --all ]; then pats=('*')
+  else for p in "$@"; do pats+=("$p#*"); done; fi
+
+  n=0
+  if [ -d "$CACHE_DIR" ]; then
+    for p in "${pats[@]}"; do
+      n=$((n + $(find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -name "$p" | wc -l)))
+    done
+  fi
+  [ "$n" -gt 0 ] || { say "Nothing to clean up"; return 0; }
+
+  before=$(du -sk "$CACHE_DIR" | cut -f1)
+  for p in "${pats[@]}"; do
+    find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -name "$p" -exec rm -rf {} +
+  done
+  freed=$((before - $(du -sk "$CACHE_DIR" | cut -f1)))
+  if [ "$freed" -ge 1024 ]; then freed="$(awk "BEGIN{printf \"%.1f\", $freed/1024}") MB"
+  else freed="$freed KB"; fi
+  say "Removed $n cached file(s), freed $freed"
+}
+
 cmd_cache() {
   case $1 in
-    rm|clear)
-      if [ "$2" = --all ] || [ -z "$2" ]; then rm -rf "$CACHE_DIR"; say "Cache cleared"
-      else rm -f "$CACHE_DIR/$2#"*; say "Removed cached downloads of $2"; fi ;;
+    rm|clear) shift; cmd_cleanup "$@" ;;
     show|'')
       [ -d "$CACHE_DIR" ] && [ -n "$(ls "$CACHE_DIR")" ] || { say "Cache is empty"; return 0; }
       ls "$CACHE_DIR" | sed 's/^/    /'
-      say "Total: $(du -sh "$CACHE_DIR" | cut -f1)  (spork cache rm [package] to clear)" ;;
-    *) die "usage: spork cache [show|rm [package]]" ;;
+      say "Total: $(du -sh "$CACHE_DIR" | cut -f1)  (spork cleanup [package] to clear)" ;;
+    *) die "usage: spork cache [show|rm [package...]]" ;;
   esac
 }
 
@@ -1009,7 +1032,8 @@ ${B}Usage:${N} spork <command> [options] [args]
   which <command>       Show where a command comes from
   hold | unhold <pkg>   Stop / allow updates for a package
   drawer add <name> [url|dir] | rm <name> | list | update
-  cache [show | rm [pkg]]
+  cleanup [pkg...]      Delete cached downloads (all, or just these packages)
+  cache [show | rm [pkg...]]
   mirror add <from> <to> | rm <from> | list | test <url>
                         Rewrite download URLs to go through a proxy or mirror
   hash <file|url>       Print a sha256 for writing manifests
@@ -1052,6 +1076,7 @@ case $cmd in
   unhold)         HOLD=0 cmd_hold "$@" ;;
   drawer)         cmd_drawer "$@" ;;
   cache)          cmd_cache "$@" ;;
+  cleanup)        cmd_cleanup "$@" ;;
   hash)           cmd_hash "$1" ;;
   mirror|mirrors) cmd_mirror "$@" ;;
   shellenv)       cmd_shellenv ;;
