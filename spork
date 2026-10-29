@@ -871,34 +871,78 @@ cmd_drawer() {
   esac
 }
 
-# Deletes everything in the cache folder, or only the given packages' downloads
-# (including half-finished .part files). The folder itself is kept.
-cmd_cleanup() {
-  local pats=() p n before freed
-  if [ $# -eq 0 ] || [ "$1" = --all ]; then pats=('*')
-  else for p in "$@"; do pats+=("$p#*"); done; fi
+# Cleanup removes things spork no longer uses: cached downloads (including
+# half-finished .part files) and version folders that "current" doesn't point
+# to, left behind when an install or update failed partway. Commands link
+# through "current" and .app bundles are moved out to $SPORK_APPDIR, so
+# nothing else refers to those folders. The helpers add to the CLEAN_* counts.
 
-  n=0
-  if [ -d "$CACHE_DIR" ]; then
-    for p in "${pats[@]}"; do
-      n=$((n + $(find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -name "$p" | wc -l)))
-    done
-  fi
-  [ "$n" -gt 0 ] || { say "Nothing to clean up"; return 0; }
+clean_reset() { CLEAN_FILES=0 CLEAN_VERSIONS=0 CLEAN_KB=0; }
 
-  before=$(du -sk "$CACHE_DIR" | cut -f1)
-  for p in "${pats[@]}"; do
-    find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -name "$p" -exec rm -rf {} +
-  done
-  freed=$((before - $(du -sk "$CACHE_DIR" | cut -f1)))
+clean_rm() {
+  CLEAN_KB=$((CLEAN_KB + $(du -sk "$1" 2>/dev/null | cut -f1)))
+  rm -rf "$1"
+}
+
+clean_report() {
+  local parts=() freed=$CLEAN_KB
+  [ "$CLEAN_VERSIONS" -gt 0 ] && parts+=("$CLEAN_VERSIONS old version(s)")
+  [ "$CLEAN_FILES" -gt 0 ] && parts+=("$CLEAN_FILES cached file(s)")
+  [ ${#parts[@]} -gt 0 ] || { say "Nothing to clean up"; return 0; }
   if [ "$freed" -ge 1024 ]; then freed="$(awk "BEGIN{printf \"%.1f\", $freed/1024}") MB"
   else freed="$freed KB"; fi
-  say "Removed $n cached file(s), freed $freed"
+  if [ ${#parts[@]} -eq 2 ]; then say "Removed ${parts[0]} and ${parts[1]}, freed $freed"
+  else say "Removed ${parts[0]}, freed $freed"; fi
+}
+
+check_pkg_names() {
+  local p; for p in "$@"; do
+    case $p in ''|.*|*/*) die "invalid package name '$p'" ;; esac
+  done
+}
+
+# Cached downloads of the given packages, or all of them.
+clean_cache() {
+  local pats=() p f
+  if [ $# -eq 0 ]; then pats=('*'); else for p in "$@"; do pats+=("$p#*"); done; fi
+  [ -d "$CACHE_DIR" ] || return 0
+  for p in "${pats[@]}"; do
+    while IFS= read -r f; do
+      [ -n "$f" ] && clean_rm "$f" && CLEAN_FILES=$((CLEAN_FILES + 1))
+    done <<EOF
+$(find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -name "$p")
+EOF
+  done
+}
+
+# Version folders of the given packages (or all) that "current" doesn't point to.
+clean_versions() {
+  local name pkgdir cur v
+  if [ $# -eq 0 ]; then set -- $(ls "$APPS_DIR" 2>/dev/null); fi
+  for name in "$@"; do
+    pkgdir=$APPS_DIR/$name
+    [ -d "$pkgdir" ] && [ ! -L "$pkgdir" ] || continue
+    cur=$(installed_version "$name")
+    for v in "$pkgdir"/*; do
+      [ -d "$v" ] && [ ! -L "$v" ] && [ "${v##*/}" != "$cur" ] || continue
+      clean_rm "$v"; CLEAN_VERSIONS=$((CLEAN_VERSIONS + 1))
+      note "removed $name ${v##*/}"
+    done
+    rmdir "$pkgdir" 2>/dev/null           # a failed first install can leave it empty
+  done
+}
+
+cmd_cleanup() {
+  [ "$1" = --all ] && shift
+  check_pkg_names "$@"
+  clean_reset; clean_versions "$@"; clean_cache "$@"; clean_report
 }
 
 cmd_cache() {
   case $1 in
-    rm|clear) shift; cmd_cleanup "$@" ;;
+    rm|clear)
+      shift; [ "$1" = --all ] && shift
+      check_pkg_names "$@"; clean_reset; clean_cache "$@"; clean_report ;;
     show|'')
       [ -d "$CACHE_DIR" ] && [ -n "$(ls "$CACHE_DIR")" ] || { say "Cache is empty"; return 0; }
       ls "$CACHE_DIR" | sed 's/^/    /'
@@ -1032,7 +1076,8 @@ ${B}Usage:${N} spork <command> [options] [args]
   which <command>       Show where a command comes from
   hold | unhold <pkg>   Stop / allow updates for a package
   drawer add <name> [url|dir] | rm <name> | list | update
-  cleanup [pkg...]      Delete cached downloads (all, or just these packages)
+  cleanup [pkg...]      Delete cached downloads and leftover old versions
+                        (of all packages, or just these)
   cache [show | rm [pkg...]]
   mirror add <from> <to> | rm <from> | list | test <url>
                         Rewrite download URLs to go through a proxy or mirror

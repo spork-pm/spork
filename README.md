@@ -37,7 +37,7 @@ spork update --all         # update everything
 spork uninstall rectangle
 spork uninstall --purge mytool  # also delete the tool's saved data (see "persist" below)
 spork hold jq              # pin a version (spork unhold jq to undo)
-spork cleanup              # delete cached downloads (spork cleanup jq for just one package)
+spork cleanup              # delete cached downloads and leftover old versions (spork cleanup jq for one package)
 spork doctor               # check PATH, folders, drawers
 ```
 
@@ -59,7 +59,8 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
 ```
 
 Command links point through `current`, so they keep working across updates. Old versions are
-deleted after an update.
+deleted after an update. If an install or update fails partway, `spork cleanup` removes any
+version folder that `current` doesn't point to.
 
 ## Drawers
 

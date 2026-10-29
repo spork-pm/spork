@@ -627,6 +627,30 @@ class SporkTest(unittest.TestCase):
         self.assertIn("Nothing to clean up", self.spork("cleanup").stdout)
         self.assertEqual(self.run_cmd("hello"), "hello 1.0")  # installed packages untouched
 
+    def test_cleanup_old_versions(self):
+        self.publish_tool("hello", "1.0")
+        self.spork("install", "hello")
+        apps = self.spork_home / "apps"
+        (apps / "hello" / "0.9" / "bin").mkdir(parents=True)       # left by a failed update
+        (apps / "broken" / "2.0").mkdir(parents=True)              # failed first install, no "current"
+
+        self.spork("cache", "rm")                                  # cache only: versions stay
+        self.assertTrue((apps / "hello" / "0.9").exists())
+
+        out = self.spork("cleanup", "hello").stdout
+        self.assertIn("removed hello 0.9", out)
+        self.assertIn("Removed 1 old version(s), freed", out)
+        self.assertEqual(sorted(p.name for p in (apps / "hello").iterdir() if p.is_dir()),
+                         ["1.0", "current"])
+        self.assertTrue((apps / "broken").exists())
+
+        self.assertIn("removed broken 2.0", self.spork("cleanup").stdout)
+        self.assertFalse((apps / "broken").exists())
+        self.assertEqual(self.run_cmd("hello"), "hello 1.0")
+        self.assertRegex(self.spork("list").stdout, r"hello\s+1\.0")
+
+        self.assertIn("invalid package name", self.spork("cleanup", "../x", ok=False).stderr)
+
     def test_hash_command(self):
         f = self.build / "x"; f.write_text("hi")
         expect = "sha256:" + sha256(f)
