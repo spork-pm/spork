@@ -658,6 +658,119 @@ class SporkTest(unittest.TestCase):
         url, _ = self.serve(f)
         self.assertEqual(self.spork("hash", url).stdout.strip(), expect)
 
+    # ------------------------------------------------------------ self-update
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                       cwd=cwd, env=self.env, check=True, capture_output=True)
+
+    def upstream(self):
+        """A local git repo standing in for spork-pm/spork, holding this spork."""
+        repo = self.build / "upstream"
+        repo.mkdir()
+        shutil.copy(SPORK, repo / "spork")
+        self.git(repo, "init", "-q", "-b", "main")
+        self.git(repo, "add", "spork")
+        self.git(repo, "commit", "-q", "-m", "v1")
+        return repo
+
+    def release(self, repo, version, marker="", text=None):
+        """Commit a new spork to the repo: a new version, plus a marker in 'spork update'."""
+        if text is None:
+            text = SPORK.read_text().replace("SPORK_VERSION=0.1.0", f"SPORK_VERSION={version}")
+            text = text.replace('say "Updating drawers"', f'say "Updating drawers{marker}"')
+        (repo / "spork").write_text(text)
+        self.git(repo, "commit", "-q", "-am", version)
+
+    def install(self, *args, repo=None):
+        # A linked "apps" drawer keeps install.sh from cloning the real one.
+        (self.home / "apps-drawer").mkdir(exist_ok=True)
+        self.spork("drawer", "add", "apps", str(self.home / "apps-drawer"))
+        env = {**self.env, "SPORK_REPO": repo or "file:///nonexistent"}
+        p = subprocess.run([str(SPORK.parent / "install.sh"), "--no-modify-path", *args],
+                           env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        return p
+
+    def installed_spork(self, *args, env=None):
+        p = subprocess.run([str(self.spork_home / "bin/spork"), *args], env={**self.env, **(env or {})},
+                           capture_output=True, text=True, timeout=120)
+        p.output = p.stdout + p.stderr
+        self.assertEqual(p.returncode, 0, p.output)
+        return p
+
+    def test_self_update_from_git(self):
+        repo = self.upstream()
+        self.install(repo=f"file://{repo}")
+        self_dir = self.spork_home / "self"
+        self.assertTrue((self_dir / ".git").is_dir())
+        self.assertEqual(os.readlink(self.spork_home / "bin/spork"), str(self_dir / "spork"))
+        self.assertIn("spork 0.1.0", self.installed_spork("version").stdout)
+        self.assertIn("spork updates itself from file://", self.installed_spork("doctor", env={"PATH": f"{self.spork_home}/bin:/usr/bin:/bin"}).output)
+
+        self.assertNotIn("Updated spork", self.installed_spork("update").output)
+
+        self.release(repo, "9.9.9", marker=" (new)")
+        out = self.installed_spork("update").output
+        self.assertIn("Updated spork to 9.9.9", out)
+        # The new version ran the rest of the update, once.
+        self.assertIn("Updating drawers (new)", out)
+        self.assertEqual(out.count("updating spork"), 1)
+        self.assertIn("spork 9.9.9", self.installed_spork("version").stdout)
+
+        # Updating specific packages, or opting out, leaves spork alone.
+        self.release(repo, "9.9.10")
+        self.publish_tool("hello", "1.0")
+        self.installed_spork("install", "hello")
+        self.assertNotIn("updating spork", self.installed_spork("update", "hello").output)
+        self.assertNotIn("updating spork", self.installed_spork("update", env={"SPORK_NO_SELF_UPDATE": "1"}).output)
+        self.assertIn("spork 9.9.9", self.installed_spork("version").stdout)
+
+    def test_self_update_keeps_broken_version_out(self):
+        repo = self.upstream()
+        self.install(repo=f"file://{repo}")
+        self.release(repo, "2.0", text="#!/bin/bash\nif then\n")
+        out = self.installed_spork("update").output
+        self.assertIn("looks broken", out)
+        self.assertIn("spork 0.1.0", self.installed_spork("version").stdout)
+
+    def test_self_update_from_download(self):
+        # No git and no reachable repo: install.sh installs its own copy as a download.
+        p = self.install()
+        self.assertIn("installing the copy", p.stdout)
+        self_dir = self.spork_home / "self"
+        top = self.build / "spork-main"
+        top.mkdir()
+        (top / "spork").write_text(SPORK.read_text().replace("SPORK_VERSION=0.1.0", "SPORK_VERSION=3.0"))
+        (top / "spork").chmod(0o755)
+        with tarfile.open(self.www / "spork.tar.gz", "w:gz") as t:
+            t.add(top, arcname="spork-main")
+        (self_dir / ".spork-source").write_text(f"{self.base_url}/spork.tar.gz\n")
+
+        out = self.installed_spork("update").output
+        self.assertIn("Updated spork to 3.0", out)
+        self.assertIn("spork 3.0", self.installed_spork("version").stdout)
+        self.assertTrue((self_dir / ".spork-source").exists())
+        self.assertNotIn("Updated spork", self.installed_spork("update").output)
+
+    def test_linked_install_never_self_updates(self):
+        self.install("--link")
+        self.assertEqual(os.readlink(self.spork_home / "self"), str(SPORK.parent))
+        out = self.installed_spork("update").output
+        self.assertNotIn("updating spork", out)
+        self.assertIn("won't update itself", self.installed_spork("doctor", env={"PATH": f"{self.spork_home}/bin:/usr/bin:/bin"}).output)
+
+    def test_install_replaces_old_layout(self):
+        old = self.spork_home / "libexec"
+        old.mkdir(parents=True)
+        shutil.copy(SPORK, old / "spork")
+        (self.spork_home / "bin").mkdir(exist_ok=True)
+        os.symlink(old / "spork", self.spork_home / "bin/spork")
+        repo = self.upstream()
+        self.install(repo=f"file://{repo}")
+        self.assertFalse(old.exists())
+        self.assertEqual(os.readlink(self.spork_home / "bin/spork"), str(self.spork_home / "self/spork"))
+
     # ------------------------------------------------------------ doctor
 
     def test_doctor(self):

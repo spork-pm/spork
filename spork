@@ -731,6 +731,76 @@ update_drawer() {
   fi
 }
 
+# ---------------------------------------------------------------- self-update
+
+# spork's own files live in $SPORK_HOME/self, fetched like a drawer: a git clone
+# of $SPORK_REPO, or a download with a .spork-source file when git is missing.
+# $BIN_DIR/spork links to self/spork. A self that's a link (install.sh --link)
+# is a developer checkout and is never updated.
+
+SELF_DIR=$SPORK_HOME/self
+SPORK_REPO=${SPORK_REPO:-https://github.com/spork-pm/spork}
+
+self_valid() { [ -f "$1/spork" ] && bash -n "$1/spork" 2>/dev/null; }
+self_version() { sed -n 's/^SPORK_VERSION=//p' "$1/spork" | head -1; }
+self_sum() { shasum "$SELF_DIR/spork" 2>/dev/null | cut -d' ' -f1; }
+
+# Put $1 in place of $SELF_DIR. Moving and deleting files is safe even while
+# one of them runs: bash keeps reading the old file it already opened.
+self_swap() {
+  rm -rf "$SELF_DIR.old"
+  if [ -e "$SELF_DIR" ] || [ -L "$SELF_DIR" ]; then mv "$SELF_DIR" "$SELF_DIR.old" || return 1; fi
+  mv "$1" "$SELF_DIR" || { mv "$SELF_DIR.old" "$SELF_DIR"; return 1; }
+  rm -rf "$SELF_DIR.old"
+  ln -sfn "$SELF_DIR/spork" "$BIN_DIR/spork"
+}
+
+# Used by install.sh: fetch a fresh copy of spork into $SELF_DIR.
+cmd_self_install() {
+  local new=$SPORK_HOME/self.new
+  rm -rf "$new"; mkdir -p "$BIN_DIR"
+  if has_git; then netgit clone -q --depth 1 "$SPORK_REPO" "$new"
+  else ( fetch_drawer_tarball "$SPORK_REPO" "$new" ); fi \
+    && self_valid "$new" && self_swap "$new" && return 0
+  rm -rf "$new"; return 1
+}
+
+# Update spork itself. If the running spork is the installed one and it changed,
+# run "spork update" again with the new version, which then skips this step.
+self_update() {
+  local running= before head new
+  [ -z "$SPORK_NO_SELF_UPDATE" ] && [ -z "$SPORK_SELF_UPDATED" ] || return 0
+  [ -d "$SELF_DIR" ] && [ ! -L "$SELF_DIR" ] || return 0
+  [ "$0" -ef "$SELF_DIR/spork" ] && running=1
+  before=$(self_sum)
+  if [ -d "$SELF_DIR/.git" ]; then
+    has_git || { warn "can't update spork: git is not available"; return 0; }
+    note "updating spork"
+    head=$(git -C "$SELF_DIR" rev-parse HEAD) || { warn "could not update spork"; return 0; }
+    netgit -C "$SELF_DIR" pull --ff-only -q || { warn "could not update spork"; return 0; }
+    if ! self_valid "$SELF_DIR"; then
+      git -C "$SELF_DIR" reset -q --hard "$head"
+      warn "the new version of spork looks broken; keeping the current one"; return 0
+    fi
+  elif [ -f "$SELF_DIR/.spork-source" ]; then
+    note "updating spork"
+    new=$TMP_ROOT/self
+    ( fetch_drawer_tarball "$(cat "$SELF_DIR/.spork-source")" "$new" ) || { warn "could not update spork"; return 0; }
+    if ! self_valid "$new"; then warn "the new version of spork looks broken; keeping the current one"; return 0; fi
+    [ "$(shasum "$new/spork" | cut -d' ' -f1)" = "$before" ] && return 0
+    self_swap "$new" || { warn "could not update spork"; return 0; }
+  else
+    return 0
+  fi
+  [ "$(self_sum)" != "$before" ] || return 0
+  say "Updated spork to $(self_version "$SELF_DIR")"
+  if [ -n "$running" ]; then
+    cleanup                               # exec skips the EXIT trap
+    export SPORK_SELF_UPDATED=1
+    exec "$SELF_DIR/spork" update
+  fi
+}
+
 # ---------------------------------------------------------------- commands
 
 cmd_install() {
@@ -751,6 +821,7 @@ cmd_uninstall() {
 cmd_update() {
   local name cur new failed=0 all=
   if [ $# -eq 0 ]; then
+    self_update
     say "Updating drawers"
     for b in $(list_drawers); do update_drawer "$b"; done
     cmd_status; return 0
@@ -1049,6 +1120,10 @@ cmd_doctor() {
   for h in $(mirror_rules | cut -f2 | while IFS= read -r t; do url_host "$t"; done | sort -u); do
     acct=$(keychain_account "$h") && say "Mirror $h: logging in as $acct (from the keychain)"
   done
+  if [ -L "$SELF_DIR" ]; then note "spork is linked to $(readlink "$SELF_DIR") and won't update itself"
+  elif [ -d "$SELF_DIR/.git" ]; then say "spork updates itself from $(git -C "$SELF_DIR" remote get-url origin 2>/dev/null)"
+  elif [ -f "$SELF_DIR/.spork-source" ]; then say "spork updates itself from $(cat "$SELF_DIR/.spork-source")"
+  else note "spork can't update itself; run install.sh again to fix that"; fi
   if has_git; then say "git is available"
   else note "git not found: drawers will be downloaded as archives (GitHub only)"; fi
   [ "$ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd && note "Rosetta 2 is not running; Intel-only packages won't start"
@@ -1064,7 +1139,7 @@ ${B}Usage:${N} spork <command> [options] [args]
   install <pkg>...      Install packages (name, drawer/name, ./file.json or URL)
   uninstall <pkg>...    Remove packages and their apps/commands (--purge also
                         deletes their saved data)
-  update                Update drawers, then show available updates
+  update                Update spork and drawers, then show available updates
   update <pkg>...       Update packages (--all for everything)
   status                Show packages with updates available
   list                  List installed packages
@@ -1126,6 +1201,7 @@ case $cmd in
   mirror|mirrors) cmd_mirror "$@" ;;
   shellenv)       cmd_shellenv ;;
   doctor)         cmd_doctor ;;
+  _self-install)  cmd_self_install ;;
   version|--version|-v) echo "spork $SPORK_VERSION" ;;
   help|'')        usage ;;
   *)              die "unknown command '$cmd' (see: spork help)" ;;

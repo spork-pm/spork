@@ -14,14 +14,23 @@ A [Scoop](https://scoop.sh)-style package manager for macOS that works without a
 ./install.sh
 ```
 
-This copies spork to `~/.spork`, adds the official `main` and `apps` drawers (see
+This downloads spork into `~/.spork/self` (a git clone of this repo, or an archive if git is
+missing), adds the official `main` and `apps` drawers (see
 [Drawers](#drawers)), and adds this line to `~/.zshrc` (or `~/.bash_profile`):
 
 ```bash
 eval "$(~/.spork/bin/spork shellenv)"
 ```
 
-Pass `--no-modify-path` to skip editing your shell file. Set `SPORK_HOME` or `SPORK_APPDIR`
+Pass `--no-modify-path` to skip editing your shell file. If spork can't be downloaded, the
+installer uses its own copy instead. Set `SPORK_REPO` to install from a fork or an internal
+copy of the repo. If you're working on spork itself, `./install.sh --link` uses your checkout
+as-is.
+
+`spork update` keeps spork itself up to date: it updates `~/.spork/self` first, then carries on
+with the new version. Set `SPORK_NO_SELF_UPDATE=1` to turn this off. Linked installs
+(`--link`) are never updated. If you installed spork before it could update itself, run
+`./install.sh` once more to switch over. Set `SPORK_HOME` or `SPORK_APPDIR`
 to use different folders. If your network blocks GitHub, set up [mirrors](#mirrors-and-proxies)
 for downloads (or point `SPORK_MIRRORS_FILE` at a shared rules file). Mirrors don't apply to git,
 so the installer's drawers must be reachable by git or through git's own `insteadOf` config.
@@ -32,7 +41,7 @@ so the installer's drawers must be reachable by git or through git's own `instea
 spork search json          # find packages
 spork install jq rectangle # install a CLI tool and a GUI app
 spork list                 # what's installed
-spork update               # refresh drawers, show what's outdated
+spork update               # update spork and drawers, show what's outdated
 spork update --all         # update everything
 spork uninstall rectangle
 spork uninstall --purge mytool  # also delete the tool's saved data (see "persist" below)
@@ -49,6 +58,7 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
 
 ```
 ~/.spork/
+  self/                   # spork itself (bin/spork links here)
   bin/                    # add to PATH: symlinks to commands
   apps/<pkg>/<version>/   # unpacked package files
   apps/<pkg>/current      # symlink to the installed version
