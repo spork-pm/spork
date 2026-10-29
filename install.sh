@@ -2,15 +2,42 @@
 # Installs spork into ~/.spork (or $SPORK_HOME). No admin rights needed.
 #   ./install.sh                  install or upgrade
 #   ./install.sh --no-modify-path don't touch your shell startup file
+#   ./install.sh --link           use this folder as spork itself (for working on
+#                                 spork); spork won't update itself
+#
+# spork is fetched from $SPORK_REPO (default: the official repo) into
+# $SPORK_HOME/self, so "spork update" can update it later.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
-export SPORK_HOME
+SPORK_REPO=${SPORK_REPO:-https://github.com/spork-pm/spork}
+export SPORK_HOME SPORK_REPO
 
-mkdir -p "$SPORK_HOME/libexec" "$SPORK_HOME/bin" "$SPORK_HOME/drawers" "$HOME/Applications"
-cp "$here/spork" "$SPORK_HOME/libexec/spork"
-chmod +x "$SPORK_HOME/libexec/spork"
-ln -sfn "$SPORK_HOME/libexec/spork" "$SPORK_HOME/bin/spork"
+modify_path=1 link=
+for a in "$@"; do
+  case $a in
+    --no-modify-path) modify_path= ;;
+    --link) link=1 ;;
+    *) echo "unknown option: $a" >&2; exit 1 ;;
+  esac
+done
+
+self=$SPORK_HOME/self
+mkdir -p "$SPORK_HOME/bin" "$SPORK_HOME/drawers" "$HOME/Applications"
+if [ -n "$link" ]; then
+  [ "$here" -ef "$self" ] && { echo "--link needs a spork folder outside $self" >&2; exit 1; }
+  rm -rf "$self"; ln -s "$here" "$self"
+elif ! "$here/spork" _self-install; then
+  # Install this copy. Its .spork-source lets "spork update" try again later.
+  echo "Couldn't fetch spork from $SPORK_REPO; installing the copy in $here instead."
+  cp "$here/spork" "$SPORK_HOME/spork.tmp"   # $here may be $self
+  rm -rf "$self"; mkdir -p "$self"
+  mv "$SPORK_HOME/spork.tmp" "$self/spork"
+  echo "$SPORK_REPO" > "$self/.spork-source"
+fi
+chmod +x "$self/spork"
+ln -sfn "$self/spork" "$SPORK_HOME/bin/spork"
+rm -rf "$SPORK_HOME/libexec"   # where older versions of this script put spork
 
 echo "spork installed in $SPORK_HOME"
 
@@ -28,10 +55,9 @@ for name in main apps; do
 done
 
 line='eval "$('"$SPORK_HOME"'/bin/spork shellenv)"'
-case "$1:${SHELL##*/}" in
-  --no-modify-path:*) rc= ;;
-  *:zsh)  rc=$HOME/.zshrc ;;
-  *:bash) rc=$HOME/.bash_profile ;;
+case "$modify_path:${SHELL##*/}" in
+  1:zsh)  rc=$HOME/.zshrc ;;
+  1:bash) rc=$HOME/.bash_profile ;;
   *)      rc= ;;
 esac
 if [ -n "$rc" ]; then
