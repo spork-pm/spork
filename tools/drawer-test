@@ -1,0 +1,44 @@
+#!/bin/bash
+# drawer-test - install manifests with spork in a throwaway SPORK_HOME, then remove them.
+#
+# Run from the root of a drawer repo:
+#     path/to/spork/tools/drawer-test package|manifest.json ...
+#
+# The drawer itself is added (as a link), so manifests that depend on others in it find
+# them. Nothing touches ~/.spork or ~/Applications. Needs macOS, like spork.
+# Exits 1 if any manifest fails to install.
+#
+# Environment:
+#   SPORK_BIN   spork script to test with (default: the one next to this tools folder)
+set -uo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+spork=${SPORK_BIN:-$(dirname "$here")/spork}
+dir=drawer; [ -d drawer ] || dir=.
+[ $# -gt 0 ] || { echo "usage: drawer-test package|manifest.json ..." >&2; exit 2; }
+
+home=$(mktemp -d)
+trap 'rm -rf "$home"' EXIT
+export SPORK_HOME=$home/spork SPORK_APPDIR=$home/Applications
+"$spork" drawer add "$(basename "$PWD")" "$PWD" >/dev/null || exit 1
+
+status=0
+for arg; do
+  case $arg in
+    /*.json) f=$arg ;;
+    *.json) f=./$arg ;;              # "./" so spork reads a file, not a package name
+    *) f=./$dir/$arg.json ;;
+  esac
+  name=$(basename "$f" .json)
+  echo "::group::spork install $name"
+  if "$spork" install "$f"; then rc=0; else rc=$?; fi
+  "$spork" uninstall --purge "$name" >/dev/null 2>&1
+  echo "::endgroup::"
+  if [ "$rc" = 0 ]; then
+    echo "$name: installed ok"
+  else
+    echo "::error file=${f#./}::$name failed to install"
+    status=1
+  fi
+done
+exit $status

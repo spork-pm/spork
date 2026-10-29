@@ -4,8 +4,8 @@
 # Run from the root of a drawer repo:
 #     path/to/spork/tools/drawer-autoupdate [package ...]
 #
-# Runs checkver --update, installs each updated manifest with spork in a throwaway
-# SPORK_HOME to make sure it works, then commits it as "<pkg>: Update to version <ver>".
+# Runs checkver --update, installs each updated manifest with drawer-test (spork in a
+# throwaway SPORK_HOME) to make sure it works, then commits it as "<pkg>: Update to version <ver>".
 # A manifest that fails to install is left out and makes the script exit 1.
 #
 # Environment:
@@ -47,22 +47,6 @@ pending=$(mktemp -d)
 for f in $changed; do cp "$f" "$pending/"; done
 git checkout -q -- $changed
 
-if [ "$testing" = 1 ]; then
-  export SPORK_HOME=$pending/home SPORK_APPDIR=$pending/home/Applications
-  # Lets manifests that depend on others in this drawer find them.
-  "$spork" drawer add "$(basename "$PWD")" "$PWD" >/dev/null
-fi
-
-test_install() {
-  local f=$1 name rc
-  name=$(basename "$f" .json)
-  echo "::group::spork install $name"
-  "$spork" install "./$f"; rc=$?
-  "$spork" uninstall --purge "$name" >/dev/null 2>&1
-  echo "::endgroup::"
-  return $rc
-}
-
 { echo "| Package | Version | Result |"; echo "|---|---|---|"; } >> "$summary"
 
 for f in $changed; do
@@ -74,8 +58,8 @@ for f in $changed; do
   [ "$mode" = pr ] && git switch -q -C "$branch" "$base"
   cp "$pending/$name.json" "$f"
 
-  if [ "$testing" = 1 ] && ! test_install "$f"; then
-    echo "::error file=$f::$name $ver failed to install; not committed"
+  if [ "$testing" = 1 ] && ! SPORK_BIN=$spork "$here/drawer-test" "$f"; then
+    echo "$name $ver not committed"
     echo "| $name | $ver | ❌ install failed |" >> "$summary"
     git checkout -q -- "$f"
     [ "$mode" = pr ] && git switch -q "$base"
