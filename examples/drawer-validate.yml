@@ -23,4 +23,4 @@ jobs:
     uses: spork-pm/spork/.github/workflows/validate.yml@main
     with:
       packages: ${{ inputs.packages }}
-      # test: false     # skip the install test (runs on Linux instead of macOS)
+      # test: false     # skip the macOS install test

@@ -22,7 +22,7 @@ on:
         type: string
         default: ""
       test:
-        description: Also install each checked manifest with spork on macOS
+        description: Also install each checked manifest with spork, in a separate macOS job
         type: boolean
         default: true
       spork-repository:
@@ -35,11 +35,15 @@ on:
         default: main
 
 jobs:
+  # Picks the manifests and checks them on Linux, so a pull request that changes no
+  # manifests never waits for a macOS runner.
   validate:
-    runs-on: ${{ inputs.test && 'macos-latest' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      packages: ${{ steps.pick.outputs.packages }}
     steps:
       - name: Check out the drawer
         uses: actions/checkout@v4
@@ -81,9 +85,30 @@ jobs:
         # PACKAGES is split on spaces on purpose.
         run: python3 .spork-src/tools/drawer-validate $PACKAGES
 
+  install:
+    needs: validate
+    # Runs even when the check fails, so both results show; skipped when nothing changed.
+    if: ${{ !cancelled() && inputs.test && needs.validate.outputs.packages != '' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the drawer
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out spork
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.spork-repository }}
+          ref: ${{ inputs.spork-ref }}
+          path: .spork-src
+          persist-credentials: false
+
       - name: Test install
-        # Runs even when the check above fails, so both results show.
-        if: ${{ !cancelled() && inputs.test && steps.pick.outputs.packages != '' }}
         env:
-          PACKAGES: ${{ steps.pick.outputs.packages }}
+          PACKAGES: ${{ needs.validate.outputs.packages }}
+        # PACKAGES is split on spaces on purpose.
         run: .spork-src/tools/drawer-test $PACKAGES
