@@ -226,3 +226,14 @@ security add-internet-password -s artifactory.example.com -a your.name -w
 - Downloads use `curl`, so HTTP proxies work through `https_proxy` / `HTTPS_PROXY`. Proxies that
   ask for Kerberos get your ticket automatically, for curl and git alike (run `kinit` first). For
   mirrors that need different URLs, see [Mirrors and proxies](#mirrors-and-proxies).
+
+## Development
+
+`tests/test_spork.py` runs spork end to end in a throwaway home folder, with packages served
+from a local web server, so it never touches your own `~/.spork` or `~/Applications`:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Python is only needed for the tests; spork itself stays a plain Bash script.
