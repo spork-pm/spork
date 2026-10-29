@@ -151,12 +151,14 @@ commits), and can be started by hand from the Actions tab to check everything.
 | Input | Default | |
 |---|---|---|
 | `packages` | changed | Packages to check, separated by spaces. Default: the manifests changed since the pull request's base (or the previous push), or all of them when that can't be told. |
-| `test` | `true` | Also install each one with spork (macOS runner, native CPU only). `false` runs on Linux without installing. |
+| `test` | `true` | Also install each one with spork, in a second job on a macOS runner (native CPU only). It's skipped when no manifests changed, so those pull requests don't wait for a macOS runner. |
 | `spork-ref` | `main` | Version of these tools to use. |
 
 Notes:
 
 - Use `pull_request`, not `pull_request_target`. The test install runs the manifest's
   scripts, which is safe with the read-only token a pull request from a fork gets.
-- To block merging broken manifests, make the `validate / validate` check required in the
-  drawer's branch protection. A pull request that changes no manifests passes right away.
+- The checks are named `validate / validate` (fields, checkver and autoupdate, on Linux) and
+  `validate / install` (macOS). To block merging broken manifests, make both required in the
+  drawer's branch protection. A skipped `install` counts as passing, so a pull request that
+  changes no manifests passes in seconds.
