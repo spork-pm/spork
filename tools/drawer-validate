@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""drawer-validate - check a drawer's manifests, for pull requests.
+
+    tools/drawer-validate [options] [package|manifest.json ...]
+
+Each manifest must:
+  1. be a JSON object with "version", "description", "homepage" and a "url" (top-level, or
+     in every "architecture.<arch>");
+  2. if it has "checkver", find a version upstream, the same way tools/checkver does;
+  3. if it has "checkver", have an "autoupdate" rule that, applied at the manifest's own
+     version, gives back the same urls, hashes and other fields. That's what
+     `checkver -u -f` checks, but it still works when upstream has a newer version.
+
+Options:
+    -d, --dir DIR    drawer folder (default: ./drawer if it exists, else .)
+    --since REF      only the manifests added or changed since git REF (all of them when REF
+                     is empty or unknown)
+    --list           print the manifests that would be checked, and stop
+    --offline        only check step 1
+
+With no packages and no --since, checks every manifest. Prints GitHub Actions annotations
+when GITHUB_ACTIONS is set. Exits 1 if any manifest fails. Set GITHUB_TOKEN to avoid GitHub's
+API rate limit.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("checkver", os.path.join(HERE, "checkver"))
+_spec = importlib.util.spec_from_loader("checkver", _loader)
+cv = importlib.util.module_from_spec(_spec)
+_loader.exec_module(cv)
+
+REQUIRED = ("version", "description", "homepage")
+
+
+# ---------------------------------------------------------------- step 1: fields
+
+def check_fields(manifest):
+    """Return a list of problems with the manifest's required fields."""
+    if not isinstance(manifest, dict):
+        return ["not a JSON object"]
+    problems = []
+    for key in REQUIRED:
+        value = manifest.get(key)
+        if not isinstance(value, str) or not value.strip():
+            problems.append("missing %s" % key)
+    if "url" not in manifest:
+        archs = manifest.get("architecture")
+        if not isinstance(archs, dict) or not archs:
+            problems.append("missing url (top-level or under architecture.<arch>)")
+        else:
+            for arch, section in archs.items():
+                if not isinstance(section, dict) or "url" not in section:
+                    problems.append("missing url in architecture.%s" % arch)
+    return problems
+
+
+# ---------------------------------------------------------------- step 3: autoupdate
+
+def normalize_hash(value):
+    """spork treats a bare hex hash as sha256, and ignores case."""
+    if isinstance(value, list):
+        return [normalize_hash(v) for v in value]
+    if not isinstance(value, str):
+        return value
+    value = value.strip().lower()
+    return value if ":" in value else "sha256:" + value
+
+
+def normalize(manifest):
+    """Copy of the manifest with every "hash" written the way checkver writes it."""
+    if isinstance(manifest, dict):
+        return {k: normalize_hash(v) if k == "hash" else normalize(v) for k, v in manifest.items()}
+    if isinstance(manifest, list):
+        return [normalize(v) for v in manifest]
+    return manifest
+
+
+def differences(expected, actual, path=""):
+    """List (path, expected, actual) for every value that differs."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        out = []
+        for key in list(expected) + [k for k in actual if k not in expected]:
+            sub = "%s.%s" % (path, key) if path else key
+            out += differences(expected.get(key), actual.get(key), sub)
+        return out
+    if (isinstance(expected, list) and isinstance(actual, list) and len(expected) == len(actual)
+            and any(isinstance(x, (dict, list)) for x in expected)):
+        out = []
+        for i, (x, y) in enumerate(zip(expected, actual)):
+            out += differences(x, y, "%s[%d]" % (path, i))
+        return out
+    return [] if expected == actual else [(path, expected, actual)]
+
+
+def uses_match_groups(auto, groups):
+    """Whether the autoupdate rule uses $match<Name> variables from checkver's named groups."""
+    text = json.dumps(auto)
+    names = ["match" + g[:1].upper() + g[1:] for g in groups]
+    return any(re.search(r"\$%s(?![A-Za-z0-9])" % re.escape(n), text, re.IGNORECASE) for n in names)
+
+
+def show(value):
+    return "nothing" if value is None else json.dumps(value, ensure_ascii=False)
+
+
+def check_autoupdate(manifest, log):
+    """Steps 2 and 3. Return (errors, warnings)."""
+    if "checkver" not in manifest:
+        if "autoupdate" in manifest:
+            return [], ["has autoupdate but no checkver, so it is never updated"]
+        return [], []
+    if not isinstance(manifest.get("autoupdate"), dict):
+        return ["has checkver but no autoupdate rule, so the scheduled update would fail"], []
+
+    current = manifest["version"]
+    try:
+        latest, groups = cv.check_version(manifest)
+    except cv.CheckverError as e:
+        return ["checkver: %s" % e], []
+    warnings = []
+    order = cv.compare_versions(latest, current)
+    if order < 0:
+        warnings.append("checkver finds %s, older than the manifest's %s" % (latest, current))
+    elif order > 0:
+        log("    upstream has %s; checking the rule at %s" % (latest, current))
+    if latest != current and uses_match_groups(manifest["autoupdate"], groups):
+        warnings.append("can't check autoupdate: it uses checkver's named groups, which come "
+                        "from %s, not %s" % (latest, current))
+        return [], warnings
+
+    try:
+        rebuilt = cv.autoupdate(manifest, current, groups if latest == current else {}, log)
+    except (cv.CheckverError, ValueError, KeyError) as e:
+        return ["autoupdate: %s" % e], warnings
+    errors = ["autoupdate gives %s for %s, the manifest has %s" % (show(got), path, show(want))
+              for path, want, got in differences(normalize(manifest), normalize(rebuilt))]
+    return errors, warnings
+
+
+# ---------------------------------------------------------------- picking manifests
+
+def drawer_dir(arg):
+    return arg or ("drawer" if os.path.isdir("drawer") else ".")
+
+
+def all_manifests(folder):
+    return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".json"))
+
+
+def changed_manifests(folder, since):
+    """Manifests added or changed since git ref `since`, or None if git can't tell."""
+    if not since or not since.strip("0"):
+        return None
+    pattern = ":(glob)*.json" if folder in (".", "") else ":(glob)%s/*.json" % folder.rstrip("/")
+    try:
+        r = subprocess.run(["git", "diff", "--name-only", "--diff-filter=d", "%s...HEAD" % since,
+                            "--", pattern], capture_output=True, text=True)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.split()  # relative to the repo root, which is where this runs
+
+
+def pick(args):
+    folder = drawer_dir(args.dir)
+    if args.packages:
+        paths = []
+        for p in args.packages:
+            path = p if p.endswith(".json") else os.path.join(folder, p + ".json")
+            if not os.path.isfile(path):
+                sys.exit("drawer-validate: no manifest %s" % path)
+            paths.append(path)
+        return paths
+    if args.since is not None:
+        changed = changed_manifests(folder, args.since)
+        if changed is not None:
+            return sorted(os.path.normpath(p) for p in changed)
+        print("drawer-validate: can't tell what changed since %r; checking every manifest"
+              % args.since, file=sys.stderr)
+    return all_manifests(folder)
+
+
+# ---------------------------------------------------------------- main
+
+def annotate(level, path, msg):
+    if os.environ.get("GITHUB_ACTIONS"):
+        print("::%s file=%s::%s" % (level, path, msg.replace("%", "%25").replace("\n", "%0A")),
+              flush=True)
+
+
+def validate(path, offline, log):
+    """Return (errors, warnings) for one manifest file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except ValueError as e:
+        return ["not valid JSON: %s" % e], []
+    except OSError as e:
+        return [str(e)], []
+    errors = check_fields(manifest)
+    if errors or offline:
+        return errors, []
+    return check_autoupdate(manifest, log)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="drawer-validate", description=__doc__.split("\n\n")[0])
+    ap.add_argument("packages", nargs="*")
+    ap.add_argument("-d", "--dir")
+    ap.add_argument("--since")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--offline", action="store_true")
+    args = ap.parse_args(argv)
+
+    paths = pick(args)
+    if args.list:
+        for p in paths:
+            print(p)
+        return 0
+    if not paths:
+        print("No manifests to check.")
+        return 0
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    rows = []
+    failed = False
+    for path in paths:
+        name = os.path.basename(path)[:-5]
+        errors, warnings = validate(path, args.offline, lambda m: print(m, flush=True))
+        for w in warnings:
+            print("%s: warning: %s" % (name, w), flush=True)
+            annotate("warning", path, w)
+        for e in errors:
+            print("%s: error: %s" % (name, e), file=sys.stderr, flush=True)
+            annotate("error", path, e)
+        if not errors:
+            print("%s: ok" % name, flush=True)
+        failed = failed or bool(errors)
+        result = "❌ " + "<br>".join(errors) if errors else "⚠️ " + "<br>".join(warnings) if warnings else "✅"
+        rows.append("| %s | %s |" % (name, result.replace("|", "\\|")))
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write("| Manifest | Result |\n|---|---|\n" + "\n".join(rows) + "\n")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

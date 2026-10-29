@@ -98,6 +98,23 @@ GitHub's API rate limit. It needs Python 3 and nothing else.
 `drawer-autoupdate` is what the workflow runs: `checkver -u`, then a test install and a commit for each
 updated manifest. `AUTOUPDATE_DRY_RUN=1` runs it without pushing.
 
+Two more tools are what the pull request check runs:
+
+```bash
+~/Developer/spork/tools/drawer-validate                    # check every manifest
+~/Developer/spork/tools/drawer-validate jq fd              # check some
+~/Developer/spork/tools/drawer-validate --since origin/main  # the ones changed on this branch
+~/Developer/spork/tools/drawer-test jq                     # install jq in a throwaway SPORK_HOME
+```
+
+`drawer-validate` checks that each manifest parses and has `version`, `description`,
+`homepage` and a `url` (top-level, or in every `architecture.<arch>`). For manifests with
+`checkver`, it also checks that the lookup finds a version, and that `autoupdate` applied at
+the manifest's own version gives back the same urls, hashes and other fields. That's the
+`checkver -u -f` check, but it doesn't fail when upstream already has a newer version. `--offline`
+only checks the fields. `drawer-test` installs and removes each manifest without touching
+`~/.spork` or `~/Applications`.
+
 ## The GitHub Actions workflow
 
 [`.github/workflows/autoupdate.yml`](../.github/workflows/autoupdate.yml) is a reusable workflow.
@@ -120,3 +137,26 @@ Notes:
   the drawer has its own CI, pass a personal access token or app token as the `token` secret.
 - A package that fails (no match, download error, failed install) doesn't block the others. The
   run is marked failed, and the job summary lists what happened to each package.
+
+## Checking pull requests
+
+[`.github/workflows/validate.yml`](../.github/workflows/validate.yml) is a reusable workflow
+that runs `drawer-validate`, then `drawer-test`, on the manifests a pull request adds or changes.
+It catches the usual mistakes in a hand-written manifest before they're merged: a `jsonpath` that
+isn't supported, a hash `regex` that matches nothing, an autoupdate `url` with the wrong extension
+or a missing `v`. Copy [`examples/drawer-validate.yml`](../examples/drawer-validate.yml) into a
+drawer as `.github/workflows/validate.yml`. It also runs on pushes to `main` (for direct
+commits), and can be started by hand from the Actions tab to check everything.
+
+| Input | Default | |
+|---|---|---|
+| `packages` | changed | Packages to check, separated by spaces. Default: the manifests changed since the pull request's base (or the previous push), or all of them when that can't be told. |
+| `test` | `true` | Also install each one with spork (macOS runner, native CPU only). `false` runs on Linux without installing. |
+| `spork-ref` | `main` | Version of these tools to use. |
+
+Notes:
+
+- Use `pull_request`, not `pull_request_target`. The test install runs the manifest's
+  scripts, which is safe with the read-only token a pull request from a fork gets.
+- To block merging broken manifests, make the `validate / validate` check required in the
+  drawer's branch protection. A pull request that changes no manifests passes right away.

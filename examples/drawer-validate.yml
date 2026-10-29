@@ -1,0 +1,26 @@
+# Copy this into a drawer repo as .github/workflows/validate.yml.
+# On each pull request (and push to main) it checks the manifests that changed: required
+# fields, that checkver finds a version, that the autoupdate rule rebuilds the same urls and
+# hashes, and that each one installs with spork on macOS.
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Packages to check, separated by spaces (empty = all)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: spork-pm/spork/.github/workflows/validate.yml@main
+    with:
+      packages: ${{ inputs.packages }}
+      # test: false     # skip the install test (runs on Linux instead of macOS)

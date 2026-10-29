@@ -1,0 +1,89 @@
+# Reusable workflow that checks a drawer's manifests before they're merged. Call it from a
+# drawer repo on pull requests:
+#
+#   on:
+#     pull_request:
+#   permissions:
+#     contents: read
+#   jobs:
+#     validate:
+#       uses: spork-pm/spork/.github/workflows/validate.yml@main
+#
+# See examples/drawer-validate.yml for a complete caller.
+name: Validate manifests
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          Packages to check, separated by spaces. Default: the manifests the pull request (or push)
+          adds or changes, or every manifest when that can't be told.
+        type: string
+        default: ""
+      test:
+        description: Also install each checked manifest with spork on macOS
+        type: boolean
+        default: true
+      spork-repository:
+        description: Where to get spork's tools from
+        type: string
+        default: spork-pm/spork
+      spork-ref:
+        description: Branch, tag or commit of spork to use
+        type: string
+        default: main
+
+jobs:
+  validate:
+    runs-on: ${{ inputs.test && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the drawer
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # to diff against the pull request's base
+          persist-credentials: false
+
+      - name: Check out spork
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.spork-repository }}
+          ref: ${{ inputs.spork-ref }}
+          path: .spork-src
+          persist-credentials: false
+
+      - name: Hide spork's checkout from git
+        run: echo .spork-src >> .git/info/exclude
+
+      - name: Pick manifests
+        id: pick
+        env:
+          PACKAGES: ${{ inputs.packages }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$PACKAGES" ]; then
+            list=$PACKAGES
+          else
+            list=$(python3 .spork-src/tools/drawer-validate --since "$BASE" --list)
+          fi
+          list=$(echo $list)  # one line
+          echo "packages=$list" >> "$GITHUB_OUTPUT"
+          if [ -n "$list" ]; then echo "Checking: $list"; else echo "No manifests changed."; fi
+
+      - name: Check manifests and autoupdate rules
+        if: steps.pick.outputs.packages != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGES: ${{ steps.pick.outputs.packages }}
+        # PACKAGES is split on spaces on purpose.
+        run: python3 .spork-src/tools/drawer-validate $PACKAGES
+
+      - name: Test install
+        # Runs even when the check above fails, so both results show.
+        if: ${{ !cancelled() && inputs.test && steps.pick.outputs.packages != '' }}
+        env:
+          PACKAGES: ${{ steps.pick.outputs.packages }}
+        run: .spork-src/tools/drawer-test $PACKAGES
