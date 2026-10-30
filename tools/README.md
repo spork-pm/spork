@@ -113,7 +113,7 @@ Two more tools are what the pull request check runs:
 the manifest's own version gives back the same urls, hashes and other fields. That's the
 `checkver -u -f` check, but it doesn't fail when upstream already has a newer version. `--offline`
 only checks the fields. `drawer-test` installs and removes each manifest without touching
-`~/.spork` or `~/Applications`.
+`~/.spork`, `~/Applications` or `~/Library/Fonts`.
 
 ## The GitHub Actions workflow
 
