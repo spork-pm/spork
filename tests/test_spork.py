@@ -726,6 +726,35 @@ class SporkTest(unittest.TestCase):
         self.assertNotIn("updating spork", self.installed_spork("update", env={"SPORK_NO_SELF_UPDATE": "1"}).output)
         self.assertIn("spork 9.9.9", self.installed_spork("version").stdout)
 
+    def test_update_shows_new_packages_and_versions(self):
+        repo = self.build / "extras"
+        repo.mkdir()
+        self.manifest("old", repo, version="1.0", description="Old tool")
+        self.manifest("same", repo, version="1.0")
+        self.git(repo, "init", "-q", "-b", "main")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-q", "-m", "one")
+        self.spork("drawer", "add", "extras", f"file://{repo}")
+
+        out = self.spork("update").output
+        self.assertNotIn("New packages", out)
+        self.assertNotIn("New versions", out)
+
+        self.manifest("old", repo, version="2.0", description="Old tool")
+        self.manifest("fresh", repo, version="0.5", description="A brand new tool")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-q", "-m", "two")
+        out = self.spork("update").stdout
+        self.assertIn("New packages:", out)
+        self.assertRegex(out, r"fresh \(extras\) +0\.5  A brand new tool")
+        self.assertIn("New versions:", out)
+        self.assertRegex(out, r"old \(extras\) +1\.0 -> 2\.0")
+        self.assertNotIn("same", out)
+
+        self.manifest("old", repo, version="3.0")
+        self.git(repo, "commit", "-q", "-am", "three")
+        self.assertRegex(self.spork("drawer", "update", "extras").stdout, r"old \(extras\) +2\.0 -> 3\.0")
+
     def test_self_update_keeps_broken_version_out(self):
         repo = self.upstream()
         self.install(repo=f"file://{repo}")
