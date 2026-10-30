@@ -1,4 +1,8 @@
-# spork
+<p align="center">
+  <img src="assets/icon.svg" alt="spork logo: a spork in an open drawer" width="160">
+</p>
+
+<h1 align="center">spork</h1>
 
 A [Scoop](https://scoop.sh)-style package manager for macOS that works without admin rights.
 
