@@ -41,7 +41,7 @@ so the installer's drawers must be reachable by git or through git's own `instea
 spork search json          # find packages
 spork install jq rectangle # install a CLI tool and a GUI app
 spork list                 # what's installed
-spork update               # update spork and drawers, show what's outdated
+spork update               # update spork and drawers, show new packages and what's outdated
 spork update --all         # update everything
 spork uninstall rectangle
 spork uninstall --purge mytool  # also delete the tool's saved data (see "persist" below)

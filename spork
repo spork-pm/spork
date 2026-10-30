@@ -731,6 +731,46 @@ update_drawer() {
   fi
 }
 
+# Print "drawer/name<TAB>version" for each manifest in the given drawers. Reads
+# the first "version" in each file with one awk call, so it stays fast on big drawers.
+drawer_snapshot() {
+  local b
+  for b in "$@"; do
+    awk -v b="$b" '
+      FNR == 1 { seen = 0 }
+      !seen && match($0, /"version"[ \t]*:[ \t]*"[^"]*"/) {
+        v = substr($0, RSTART, RLENGTH); sub(/^"version"[ \t]*:[ \t]*"/, "", v); sub(/"$/, "", v)
+        n = FILENAME; sub(/.*\//, "", n); sub(/\.json$/, "", n)
+        print b "/" n "\t" v; seen = 1
+      }' "$(manifest_dir "$DRAWERS_DIR/$b")"/*.json 2>/dev/null
+  done
+}
+
+# Update drawers, then show packages they added and versions they changed.
+update_drawers() {
+  local before=$TMP_ROOT/drawers-before after=$TMP_ROOT/drawers-after b kind q a v desc name
+  drawer_snapshot "$@" > "$before"
+  for b in "$@"; do update_drawer "$b"; done
+  drawer_snapshot "$@" > "$after"
+  awk -F'\t' 'NR == FNR { old[$1] = $2; next }
+    !($1 in old) { print "new\t" $1 "\t-\t" $2; next }
+    old[$1] != $2 { print "upd\t" $1 "\t" old[$1] "\t" $2 }' "$before" "$after" > "$TMP_ROOT/drawers-diff"
+  for kind in new upd; do
+    grep -q "^$kind	" "$TMP_ROOT/drawers-diff" || continue
+    if [ $kind = new ]; then say "New packages:"; else say "New versions:"; fi
+    while IFS=$'\t' read -r _ q a v; do
+      name=${q#*/}; b=${q%%/*}
+      [ "$b" = main ] || name="$name ($b)"
+      if [ $kind = new ]; then
+        desc=$(jget "$(manifest_dir "$DRAWERS_DIR/$b")/${q#*/}.json" description)
+        printf '    %-24s %s%s\n' "$name" "$G$v$N" "${desc:+  $D$desc$N}"
+      else
+        printf '    %-24s %s -> %s\n' "$name" "$a" "$G$v$N"
+      fi
+    done < <(grep "^$kind	" "$TMP_ROOT/drawers-diff" | sort -t$'\t' -k2)
+  done
+}
+
 # ---------------------------------------------------------------- self-update
 
 # spork's own files live in $SPORK_HOME/self, fetched like a drawer: a git clone
@@ -823,7 +863,7 @@ cmd_update() {
   if [ $# -eq 0 ]; then
     self_update
     say "Updating drawers"
-    for b in $(list_drawers); do update_drawer "$b"; done
+    update_drawers $(list_drawers)
     cmd_status; return 0
   fi
   if [ "$1" = --all ] || [ "$1" = '*' ]; then all=1; set -- $(installed_list); fi
@@ -937,7 +977,7 @@ cmd_drawer() {
           "$(ls "$(manifest_dir "$DRAWERS_DIR/$b")"/*.json 2>/dev/null | wc -l | tr -d ' ')" "$D" "$(drawer_kind "$b")" "$N"
       done ;;
     update)
-      local b; for b in ${@:-$(list_drawers)}; do update_drawer "$b"; done ;;
+      update_drawers ${@:-$(list_drawers)} ;;
     *) die "usage: spork drawer [add|rm|list|update]" ;;
   esac
 }
@@ -1139,7 +1179,7 @@ ${B}Usage:${N} spork <command> [options] [args]
   install <pkg>...      Install packages (name, drawer/name, ./file.json or URL)
   uninstall <pkg>...    Remove packages and their apps/commands (--purge also
                         deletes their saved data)
-  update                Update spork and drawers, then show available updates
+  update                Update spork and drawers, show new packages and updates
   update <pkg>...       Update packages (--all for everything)
   status                Show packages with updates available
   list                  List installed packages
