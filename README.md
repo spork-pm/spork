@@ -101,6 +101,11 @@ spork install work/sometool                                     # pick a drawer 
 You can also install straight from a manifest: `spork install ./foo.json` or
 `spork install https://example.com/foo.json`.
 
+To start a drawer of your own, create a repo from
+[spork-pm/drawer-template](https://github.com/spork-pm/drawer-template) (**Use this template** on
+GitHub). It comes with the [workflows](tools/README.md) that check pull requests and keep
+manifests up to date.
+
 ## Manifest format
 
 ```json

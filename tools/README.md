@@ -7,6 +7,9 @@ drawer up to date: it rewrites each outdated manifest (new `version`, `url`, `ha
 
 These tools are for drawer maintainers. spork itself ignores both fields.
 
+A drawer made from [spork-pm/drawer-template](https://github.com/spork-pm/drawer-template) already
+has both workflows below set up.
+
 ## Example
 
 ```json
