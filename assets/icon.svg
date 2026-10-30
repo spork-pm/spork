@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>spork</title>
+  <defs>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#EEF1F4"/>
+      <stop offset="1" stop-color="#C9D1D9"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F06A3A"/>
+      <stop offset="1" stop-color="#D9452A"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFA062"/>
+      <stop offset="1" stop-color="#F57A40"/>
+    </linearGradient>
+    <linearGradient id="inside" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5A1C10"/>
+      <stop offset="1" stop-color="#8A2E18"/>
+    </linearGradient>
+    <g id="spork">
+      <path d="M176 172 C176 140 184 118 196 106 L216 166 L236 92 L256 166 L276 92 L296 166 L316 106 C328 118 336 140 336 172 C336 240 300 288 256 292 C212 288 176 240 176 172 Z"/>
+      <path d="M244 282 L268 282 C268 310 280 360 280 420 C280 444 270 456 256 456 C242 456 232 444 232 420 C232 360 244 310 244 282 Z"/>
+    </g>
+  </defs>
+
+  <g stroke="#2B1A16" stroke-width="8" stroke-linejoin="round">
+    <ellipse cx="256" cy="478" rx="190" ry="14" fill="#2B1A16" fill-opacity="0.12" stroke="none"/>
+    <rect x="108" y="196" width="296" height="272" rx="22" fill="url(#body)"/>
+    <rect x="94" y="184" width="324" height="30" rx="12" fill="#FFB07A"/>
+    <rect x="132" y="410" width="248" height="40" rx="10" fill="#E85D33"/>
+    <rect x="226" y="424" width="60" height="12" rx="6" fill="#2B1A16" stroke="none"/>
+    <path d="M96 304 L128 240 L384 240 L416 304 Z" fill="url(#inside)"/>
+    <path d="M96 304 L128 240 L146 240 L124 304 Z" fill="#B5401F" stroke-width="0"/>
+    <path d="M416 304 L384 240 L366 240 L388 304 Z" fill="#B5401F" stroke-width="0"/>
+    <path d="M96 304 L128 240 L384 240 L416 304" fill="none"/>
+  </g>
+
+  <g transform="translate(30 -78) rotate(24 256 272) translate(256 272) scale(0.82) translate(-256 -272)">
+    <use href="#spork" fill="#2B1A16" stroke="#2B1A16" stroke-width="20" stroke-linejoin="round"/>
+    <use href="#spork" fill="url(#steel)"/>
+    <ellipse cx="256" cy="226" rx="52" ry="50" fill="#A9B4BF" fill-opacity="0.25"/>
+    <path d="M204 186 C204 226 220 254 244 270" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <g stroke="#2B1A16" stroke-width="8" stroke-linejoin="round">
+    <rect x="78" y="296" width="356" height="98" rx="20" fill="url(#front)"/>
+    <path d="M100 312 L412 312" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="6" stroke-linecap="round"/>
+    <rect x="206" y="336" width="100" height="22" rx="11" fill="#2B1A16" stroke="none"/>
+  </g>
+</svg>
