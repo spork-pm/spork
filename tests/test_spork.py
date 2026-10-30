@@ -44,6 +44,7 @@ class SporkTest(unittest.TestCase):
         self.home = root / "home"
         self.spork_home = self.home / ".spork"
         self.appdir = self.home / "Applications"
+        self.fontdir = self.home / "Fonts"
         self.drawer = root / "drawer"          # linked as the "main" drawer
         self.www = root / "www"                # served over HTTP
         self.build = root / "build"            # scratch space for making packages
@@ -60,6 +61,7 @@ class SporkTest(unittest.TestCase):
             HOME=str(self.home),
             SPORK_HOME=str(self.spork_home),
             SPORK_APPDIR=str(self.appdir),
+            SPORK_FONTDIR=str(self.fontdir),
             SPORK_ARCH="arm64",
             SPORK_KEYCHAIN="0",
             SHELL="/bin/zsh",
@@ -493,6 +495,59 @@ class SporkTest(unittest.TestCase):
         self.assertTrue((self.appdir / "Foo.app").is_dir())
         self.spork("install", "--force", "foo")
         self.assertEqual(self.run_cmd("foo"), "Foo 1.0")
+
+    # ------------------------------------------------------------ fonts
+
+    def publish_font(self, name, version, files, font="fonts/*.ttf"):
+        """A package with {file name: text} under fonts/, plus a README that isn't a font."""
+        top = f"{name}-{version}"
+        src = self.tree(top, {"README.md": "not a font", **{f"fonts/{k}": v for k, v in files.items()}})
+        out = self.build / f"{top}.zip"
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", src, out], check=True)
+        url, digest = self.serve(out)
+        return self.manifest(name, version=version, url=url, hash=digest, extract_dir=top, font=font)
+
+    def test_font_install_update_uninstall(self):
+        self.publish_font("mono", "1.0", {"Mono-Regular.ttf": "r1", "Mono Bold.ttf": "b1"})
+        self.spork("install", "mono")
+        self.assertEqual(sorted(p.name for p in self.fontdir.iterdir()), ["Mono Bold.ttf", "Mono-Regular.ttf"])
+        self.assertIn("Fonts:       fonts/*.ttf", self.spork("info", "mono").stdout)
+
+        # 2.0 drops the bold face: it's removed, the regular one is replaced.
+        self.publish_font("mono", "2.0", {"Mono-Regular.ttf": "r2"})
+        self.spork("update", "mono")
+        self.assertEqual([p.name for p in self.fontdir.iterdir()], ["Mono-Regular.ttf"])
+        self.assertEqual((self.fontdir / "Mono-Regular.ttf").read_text(), "r2")
+
+        self.spork("uninstall", "mono")
+        self.assertEqual(list(self.fontdir.iterdir()), [])
+
+    def test_font_conflicts(self):
+        self.fontdir.mkdir()
+        (self.fontdir / "Mine.ttf").write_text("user's own")
+        self.publish_font("mine", "1.0", {"Mine.ttf": "packaged", "Other.ttf": "o"})
+        self.assertIn("wasn't installed by spork", self.spork("install", "mine", ok=False).stderr)
+        # Nothing was moved before the conflict was found.
+        self.assertEqual([p.name for p in self.fontdir.iterdir()], ["Mine.ttf"])
+        self.assertEqual((self.fontdir / "Mine.ttf").read_text(), "user's own")
+        self.spork("install", "--force", "mine")
+        self.assertEqual((self.fontdir / "Mine.ttf").read_text(), "packaged")
+
+        self.publish_font("copycat", "1.0", {"Other.ttf": "c"})
+        self.assertIn("belongs to the package 'mine'", self.spork("install", "copycat", ok=False).stderr)
+        self.assertEqual((self.fontdir / "Other.ttf").read_text(), "o")
+
+    def test_bad_font_entries(self):
+        # Build the zip once: a rebuilt one has a new hash but the same cached file name.
+        path = self.publish_font("bad", "1.0", {"A.ttf": "a"})
+        base = json.loads(path.read_text())
+        for font, msg in [("fonts/*.otf", "not found in package"), ("../x.ttf", "plain path"),
+                          ("/x.ttf", "relative"), ("fonts", "is not a file")]:
+            path.write_text(json.dumps({**base, "font": font}))
+            with self.subTest(font=font):
+                self.assertIn(msg, self.spork("install", "bad", ok=False).stderr)
+                self.assertIsNone(self.installed("bad"))
+        self.assertFalse(self.fontdir.exists())
 
     # ------------------------------------------------------------ persisted data
 

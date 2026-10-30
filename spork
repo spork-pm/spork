@@ -1,8 +1,8 @@
 #!/bin/bash
 # spork - a Scoop-style package manager for macOS that never needs admin rights.
 #
-# GUI apps go to ~/Applications, command-line tools are linked into ~/.spork/bin
-# (add that to $PATH with: eval "$(spork shellenv)").
+# GUI apps go to ~/Applications, fonts to ~/Library/Fonts, command-line tools are
+# linked into ~/.spork/bin (add that to $PATH with: eval "$(spork shellenv)").
 #
 # Only uses tools that ship with macOS: bash 3.2, curl, plutil (reads JSON),
 # shasum, ditto, tar, hdiutil and pkgutil. git is optional.
@@ -16,6 +16,7 @@ PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin
 SPORK_VERSION=0.1.0
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
 SPORK_APPDIR=${SPORK_APPDIR:-$HOME/Applications}
+SPORK_FONTDIR=${SPORK_FONTDIR:-$HOME/Library/Fonts}
 BIN_DIR=$SPORK_HOME/bin
 APPS_DIR=$SPORK_HOME/apps
 DRAWERS_DIR=$SPORK_HOME/drawers
@@ -177,7 +178,8 @@ installed_list() {
 }
 receipt() { sed -n "s/^$2=//p" "$APPS_DIR/$1/current/.spork/info" 2>/dev/null; }
 
-# Which package owns a command name in $BIN_DIR / an app path in $SPORK_APPDIR.
+# Which package owns a command name in $BIN_DIR / an app path in $SPORK_APPDIR /
+# a font path in $SPORK_FONTDIR.
 owner_of() {
   local list=$1 item=$2 f
   for f in "$APPS_DIR"/*/"$list"; do
@@ -353,15 +355,15 @@ extract() {
 }
 
 # Run an install/uninstall hook from the manifest. Hooks see $dir, $version,
-# $appdir, $bindir, $arch and $persist_dir.
+# $appdir, $fontdir, $bindir, $arch and $persist_dir.
 run_hook() {
   local f=$1 hook=$2 dir=$3 script
   script=$(jlist "$f" "$hook")
   [ -n "$script" ] || return 0
   note "running $hook"
-  ( cd "$dir" && dir=$dir version=$(jget "$f" version) appdir=$SPORK_APPDIR bindir=$BIN_DIR arch=$M_ARCH \
+  ( cd "$dir" && dir=$dir version=$(jget "$f" version) appdir=$SPORK_APPDIR fontdir=$SPORK_FONTDIR bindir=$BIN_DIR arch=$M_ARCH \
       persist_dir=$PERSIST_DIR/$(basename "$(dirname "$dir")") \
-      bash -ec "export dir version appdir bindir arch persist_dir; $script" ) || die "$hook failed"
+      bash -ec "export dir version appdir fontdir bindir arch persist_dir; $script" ) || die "$hook failed"
 }
 
 # ---------------------------------------------------------------- linking
@@ -437,6 +439,62 @@ EOF
     done < "$pkgdir/.spork-apps"
   fi
   mv "$new" "$pkgdir/.spork-apps"
+}
+
+# Print each package file a "font" entry matches, one per line. Entries are
+# paths relative to the package folder and may use wildcards, e.g. "ttf/*.ttf".
+font_files() {
+  local dir=$1 entry=$2 m IFS=
+  case "/$entry/" in
+    */../*|*/./*) die "font '$entry' must be a plain path inside the package" ;;
+  esac
+  case $entry in /*) die "font '$entry' must be relative to the package folder" ;; esac
+  shopt -s nullglob; m=("$dir"/$entry); shopt -u nullglob
+  [ ${#m[@]} -gt 0 ] || die "font '$entry' not found in package"
+  printf '%s\n' "${m[@]}"
+}
+
+# Move font files into $SPORK_FONTDIR, where macOS picks them up for this user;
+# remove ones the previous version had but the new one doesn't. Everything is
+# checked before anything is moved, so a conflict leaves the fonts as they were.
+install_fonts() {
+  local name=$1 f=$2 dir=$3 pkgdir=$APPS_DIR/$1 entry file target owner new old
+  local list=$TMP_ROOT/fontlist-$1
+  local -a files=() targets=()
+  local i=0 n=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    font_files "$dir" "$entry" > "$list"            # not in $(...), so its errors stop the install
+    while IFS= read -r file; do
+      [ -f "$file" ] || die "$name: font '${file#"$dir"/}' is not a file"
+      target=$SPORK_FONTDIR/$(basename "$file")
+      case " ${targets[*]-} " in *" $target "*) die "$name: two fonts are named $(basename "$file")" ;; esac
+      owner=$(owner_of .spork-fonts "$target")
+      if [ -e "$target" ] && [ "$owner" != "$name" ] && [ -z "$FORCE" ]; then
+        if [ -n "$owner" ]; then die "$target belongs to the package '$owner'. Use --force to replace it."
+        else die "$target already exists and wasn't installed by spork. Use --force to replace it."; fi
+      fi
+      files[n]=$file; targets[n]=$target; n=$((n + 1))
+    done < "$list"
+  done <<EOF
+$(k=$(mkey "$f" font) && jlist "$f" "$k")
+EOF
+  [ "$n" -gt 0 ] || { [ -f "$pkgdir/.spork-fonts" ] || return 0; }
+
+  new=$TMP_ROOT/fonts-$name; : > "$new"
+  [ "$n" -gt 0 ] && { mkdir -p "$SPORK_FONTDIR" || die "could not create $SPORK_FONTDIR"; }
+  while [ "$i" -lt "$n" ]; do
+    rm -f "${targets[i]}" && mv "${files[i]}" "${targets[i]}" || die "could not move ${files[i]#"$dir"/} to $SPORK_FONTDIR"
+    echo "${targets[i]}" >> "$new"
+    i=$((i + 1))
+  done
+  [ "$n" -gt 0 ] && note "installed $n font(s) in $SPORK_FONTDIR"
+  if [ -f "$pkgdir/.spork-fonts" ]; then
+    while IFS= read -r old; do
+      [ -n "$old" ] && ! grep -qxF -- "$old" "$new" && rm -f "$old" && note "removed $old"
+    done < "$pkgdir/.spork-fonts"
+  fi
+  if [ -s "$new" ]; then mv "$new" "$pkgdir/.spork-fonts"; else rm -f "$new" "$pkgdir/.spork-fonts"; fi
 }
 
 # ---------------------------------------------------------------- persisted user data
@@ -594,6 +652,7 @@ EOF
   run_hook "$f" pre_install "$dir"
   link_persist "$name" "$f" "$dir"
   install_apps "$name" "$f" "$dir"
+  install_fonts "$name" "$f" "$dir"
   unlink_bins "$name"
   ln -sfn "$ver" "$pkgdir/current"
   link_bins "$name" "$f"
@@ -647,6 +706,10 @@ do_uninstall() {
   if [ -f "$pkgdir/.spork-apps" ]; then
     while IFS= read -r a; do [ -n "$a" ] && remove_app "$a"; done < "$pkgdir/.spork-apps"
   fi
+  if [ -f "$pkgdir/.spork-fonts" ]; then
+    while IFS= read -r a; do [ -n "$a" ] && rm -f "$a"; done < "$pkgdir/.spork-fonts"
+    note "removed $(grep -c . "$pkgdir/.spork-fonts") font(s) from $SPORK_FONTDIR"
+  fi
   rm -rf "$pkgdir"
   if [ -d "$PERSIST_DIR/$name" ]; then
     if [ -n "$PURGE" ]; then rm -rf "$PERSIST_DIR/$name"; note "deleted saved data in $PERSIST_DIR/$name"
@@ -682,7 +745,7 @@ latest_version() {
 # The official drawers, which "spork drawer add <name>" knows without a URL.
 known_drawer_url() {
   case $1 in
-    main|apps) echo "https://github.com/spork-pm/$1" ;;
+    main|apps|fonts) echo "https://github.com/spork-pm/$1" ;;
     *) return 1 ;;
   esac
 }
@@ -941,6 +1004,7 @@ cmd_info() {
   printf '%sInstalled:%s   %s\n' "$B" "$N" "${cur:-no}"
   v=$(bin_entries "$f" | cut -f2 | tr '\n' ' '); [ -n "${v% }" ] && printf '%sCommands:%s    %s\n' "$B" "$N" "$v"
   v=$(k=$(mkey "$f" app) && jlist "$f" "$k" | tr '\n' ' '); [ -n "${v% }" ] && printf '%sApps:%s        %s\n' "$B" "$N" "$v"
+  v=$(k=$(mkey "$f" font) && jlist "$f" "$k" | tr '\n' ' '); [ -n "${v% }" ] && printf '%sFonts:%s       %s\n' "$B" "$N" "$v"
   v=$(jlist "$f" depends | tr '\n' ' '); [ -n "${v% }" ] && printf '%sDepends:%s     %s\n' "$B" "$N" "$v"
   [ -d "$PERSIST_DIR/$M_NAME" ] && printf '%sSaved data:%s  %s\n' "$B" "$N" "$PERSIST_DIR/$M_NAME"
   v=$(resolve_paths "$M_NAME" "$f" 2>/dev/null | tr '\n' ' '); [ -n "${v% }" ] && printf '%sAdds to PATH:%s %s\n' "$B" "$N" "$v"
@@ -953,7 +1017,7 @@ cmd_drawer() {
     add)
       local name=$1 url=$2 d
       [ -n "$url" ] || url=$(known_drawer_url "$name") \
-        || die "usage: spork drawer add <name> <git-url | github-url | directory>  (main and apps need no URL)"
+        || die "usage: spork drawer add <name> <git-url | github-url | directory>  (main, apps and fonts need no URL)"
       d=$DRAWERS_DIR/$name
       [ -e "$d" ] && die "drawer '$name' already exists"
       mkdir -p "$DRAWERS_DIR"
@@ -1152,6 +1216,8 @@ cmd_doctor() {
   case ":$PATH:" in *":$BIN_DIR:"*) say "PATH includes $BIN_DIR" ;; *) ok=; path_hint ;; esac
   if mkdir -p "$SPORK_APPDIR" 2>/dev/null && [ -w "$SPORK_APPDIR" ]; then say "$SPORK_APPDIR is writable"
   else ok=; warn "$SPORK_APPDIR is not writable"; fi
+  if mkdir -p "$SPORK_FONTDIR" 2>/dev/null && [ -w "$SPORK_FONTDIR" ]; then say "$SPORK_FONTDIR is writable"
+  else ok=; warn "$SPORK_FONTDIR is not writable"; fi
   if [ -n "$(list_drawers)" ]; then say "Drawers: $(list_drawers | tr '\n' ' ')"
   else ok=; warn "no drawers. Add the official ones with: spork drawer add main; spork drawer add apps"; fi
   local m; m=$(mirror_rules | grep -c .)
@@ -1177,7 +1243,7 @@ ${B}spork $SPORK_VERSION${N} - install apps and tools on macOS without admin rig
 ${B}Usage:${N} spork <command> [options] [args]
 
   install <pkg>...      Install packages (name, drawer/name, ./file.json or URL)
-  uninstall <pkg>...    Remove packages and their apps/commands (--purge also
+  uninstall <pkg>...    Remove packages and their apps/fonts/commands (--purge also
                         deletes their saved data)
   update                Update spork and drawers, show new packages and updates
   update <pkg>...       Update packages (--all for everything)
@@ -1202,7 +1268,7 @@ ${B}Usage:${N} spork <command> [options] [args]
 
 ${B}Options:${N} -f, --force   reinstall, or replace files spork doesn't own
 
-Apps go to $SPORK_APPDIR, commands to $BIN_DIR.
+Apps go to $SPORK_APPDIR, fonts to $SPORK_FONTDIR, commands to $BIN_DIR.
 EOF
 }
 

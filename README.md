@@ -3,6 +3,7 @@
 A [Scoop](https://scoop.sh)-style package manager for macOS that works without admin rights.
 
 - GUI apps (`.app`) are installed into `~/Applications`.
+- Fonts are installed into `~/Library/Fonts`, where macOS picks them up for your user.
 - Command-line tools are linked into `~/.spork/bin`, which you add to `$PATH`.
 - Nothing is written outside your home folder, and `sudo` is never used.
 - It's a single Bash script that only uses tools macOS ships with (`curl`, `plutil`, `shasum`,
@@ -30,7 +31,7 @@ as-is.
 `spork update` keeps spork itself up to date: it updates `~/.spork/self` first, then carries on
 with the new version. Set `SPORK_NO_SELF_UPDATE=1` to turn this off. Linked installs
 (`--link`) are never updated. If you installed spork before it could update itself, run
-`./install.sh` once more to switch over. Set `SPORK_HOME` or `SPORK_APPDIR`
+`./install.sh` once more to switch over. Set `SPORK_HOME`, `SPORK_APPDIR` or `SPORK_FONTDIR`
 to use different folders. If your network blocks GitHub, set up [mirrors](#mirrors-and-proxies)
 for downloads (or point `SPORK_MIRRORS_FILE` at a shared rules file). Mirrors don't apply to git,
 so the installer's drawers must be reachable by git or through git's own `insteadOf` config.
@@ -66,6 +67,7 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
   persist/<pkg>/          # user data kept across updates and uninstalls
   cache/                  # downloads, reused on reinstall
 ~/Applications/           # .app bundles
+~/Library/Fonts/          # font files
 ```
 
 Command links point through `current`, so they keep working across updates. Old versions are
@@ -82,7 +84,10 @@ It's what Scoop calls a bucket. The installer adds the two official drawers:
 | [`main`](https://github.com/spork-pm/main) | Command-line tools, linked into `~/.spork/bin` |
 | [`apps`](https://github.com/spork-pm/apps) | GUI apps, installed into `~/Applications` |
 
-To add them again later, run `spork drawer add main` or `spork drawer add apps` (no URL needed).
+A third official drawer, [`fonts`](https://github.com/spork-pm/fonts), holds fonts. It isn't
+added by the installer; run `spork drawer add fonts` to get it.
+
+To add `main` or `apps` again later, run `spork drawer add main` or `spork drawer add apps` (no URL needed).
 When several drawers have a package with the same name, `main` wins, then the others in
 alphabetical order. Use `drawer/package` to pick one.
 
@@ -109,6 +114,7 @@ You can also install straight from a manifest: `spork install ./foo.json` or
     "extract_dir": "foo-1.2.3",
     "bin": ["foo", ["bin/foo-cli", "foo2"]],
     "app": "Foo.app",
+    "font": "fonts/*.ttf",
     "depends": ["bar"],
     "persist": ["data", ["conf/settings.ini", "settings.ini"]],
     "env_add_path": ["tools", "$persist_dir/data/bin"],
@@ -127,10 +133,11 @@ You can also install straight from a manifest: `spork install ./foo.json` or
 | `extract_dir` | Folder inside the archive to use as the package root. |
 | `bin` | Commands to link into `~/.spork/bin`: `"path"`, or a list of `"path"` / `["path", "alias"]`. A path can point inside an installed app, e.g. `["Foo.app/Contents/Resources/foo", "foo"]`. |
 | `app` | `.app` bundle(s) to move into `~/Applications`. |
+| `font` | Font files to move into `~/Library/Fonts`: a path or a list of them, relative to the package folder. Wildcards work, e.g. `"ttf/*.ttf"`. spork won't replace a font it didn't install, or one from another package, without `--force`. Fonts an update no longer ships are removed. |
 | `depends` | Packages to install first. |
 | `persist` | Files or folders inside the package that hold user data: `"path"`, or a list of `"path"` / `["path", "name"]`. See [Persisted data](#persisted-data). |
 | `env_add_path` | Extra folders to put on `PATH`, for tools that install their own commands. See [Extra PATH folders](#extra-path-folders). |
-| hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$bindir`, `$arch` and `$persist_dir` (the package's [persisted data](#persisted-data) folder) set. |
+| hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$fontdir`, `$bindir`, `$arch` and `$persist_dir` (the package's [persisted data](#persisted-data) folder) set. |
 
 Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.zst`, `.dmg`
 (mounted read-only, contents copied), `.pkg` (payload unpacked; its installer scripts are **not**
@@ -242,7 +249,7 @@ security add-internet-password -s artifactory.example.com -a your.name -w
 ## Development
 
 `tests/test_spork.py` runs spork end to end in a throwaway home folder, with packages served
-from a local web server, so it never touches your own `~/.spork` or `~/Applications`:
+from a local web server, so it never touches your own `~/.spork`, `~/Applications` or `~/Library/Fonts`:
 
 ```bash
 python3 -m unittest discover -s tests -v
