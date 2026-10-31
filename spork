@@ -193,6 +193,78 @@ remove_app() {
 }
 app_running() { pgrep -f "$1/Contents/MacOS/" >/dev/null 2>&1; }
 
+# ---------------------------------------------------------------- app versions
+#
+# Many apps update themselves. Before downloading an update, spork asks the installed
+# app which version it's at (its Info.plist), so it doesn't replace an app that is
+# already as new as the drawer's version.
+
+# Compare two versions: print -1, 0 or 1. Numbers compare as numbers, a missing number
+# counts as 0 (1.2 = 1.2.0), and a trailing word marks a pre-release (1.0-rc1 < 1.0).
+ver_cmp() {
+  local -a a b; local i n x y
+  a=($(printf '%s' "$1" | sed -E 's/[0-9]+/ & /g; s/[^A-Za-z0-9]+/ /g' | tr 'A-Z' 'a-z'))
+  b=($(printf '%s' "$2" | sed -E 's/[0-9]+/ & /g; s/[^A-Za-z0-9]+/ /g' | tr 'A-Z' 'a-z'))
+  n=${#a[@]}; [ ${#b[@]} -gt "$n" ] && n=${#b[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    x=${a[i]}; y=${b[i]}; i=$((i + 1))
+    case $x in '') case $y in *[!0-9]*) echo 1; return ;; *) x=0 ;; esac ;; esac
+    case $y in '') case $x in *[!0-9]*) echo -1; return ;; *) y=0 ;; esac ;; esac
+    [ "$x" = "$y" ] && continue
+    case $x$y in
+      *[!0-9]*)                                     # at least one word
+        case $x in *[!0-9]*) ;; *) echo 1; return ;; esac
+        case $y in *[!0-9]*) ;; *) echo -1; return ;; esac
+        if [[ $x < $y ]]; then echo -1; else echo 1; fi; return ;;
+    esac
+    x=${x#"${x%%[!0]*}"}; y=${y#"${y%%[!0]*}"}      # numbers of any length: drop leading
+    [ "$x" = "$y" ] && continue                     # zeros, then compare length and digits
+    if [ ${#x} -ne ${#y} ]; then [ ${#x} -lt ${#y} ] && echo -1 || echo 1; return; fi
+    if [[ $x < $y ]]; then echo -1; else echo 1; fi; return
+  done
+  echo 0
+}
+
+# The version an app reports, spelled one of two ways that drawers use for manifest
+# versions: "short" is CFBundleShortVersionString (2.0.4), "build" adds CFBundleVersion
+# without its leading letters (2026.2.4-262.11879.100 for IU-262.11879.100).
+app_version() {
+  local plist=$1/Contents/Info.plist short build
+  short=$(plutil -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null) && [ -n "$short" ] || return 1
+  case $2 in
+    short) echo "$short" ;;
+    build)
+      build=$(plutil -extract CFBundleVersion raw -o - "$plist" 2>/dev/null) || return 1
+      build=${build#"${build%%[0-9]*}"}
+      [ -n "$build" ] && echo "$short-$build" ;;
+    *) return 1 ;;
+  esac
+}
+
+main_app() { local a; a=$(head -n 1 "$APPS_DIR/$1/.spork-apps" 2>/dev/null) && [ -d "$a" ] && echo "$a"; }
+
+# How the package's app spells the manifest version $2 ("short" or "build"), if it does.
+app_version_style() {
+  local app style v
+  app=$(main_app "$1") || return 1
+  for style in short build; do
+    v=$(app_version "$app" "$style") && [ "$(ver_cmp "$v" "$2")" = 0 ] && { echo "$style"; return 0; }
+  done
+  return 1
+}
+
+# If the package's app has updated itself to version $2 or later, print its version.
+# Only trusted when the app reported the manifest's version at install time, so the
+# app and the drawer are known to number versions the same way.
+app_updated_itself() {
+  local style app have
+  style=$(receipt "$1" app_version) && [ -n "$style" ] || return 1
+  app=$(main_app "$1") || return 1
+  have=$(app_version "$app" "$style") || return 1
+  [ "$(ver_cmp "$have" "$2")" != -1 ] && echo "$have"
+}
+
 # ---------------------------------------------------------------- mirrors
 #
 # The mirrors file holds URL rewrite rules, one per line: "<from-prefix> <to-prefix>".
@@ -589,7 +661,7 @@ EOF
 do_install() {
   resolve "$1"
   local name=$M_NAME f=$M_FILE drawer=$M_DRAWER source=$M_SOURCE
-  local ver pkgdir cur dep i url dl fname cached ed src x dir n
+  local ver pkgdir cur dep i url dl fname cached ed src x dir n have
   local -a urls hashes
   ver=$(jget "$f" version)
   pkgdir=$APPS_DIR/$name
@@ -597,6 +669,9 @@ do_install() {
 
   if [ "$cur" = "$ver" ] && [ -z "$FORCE" ]; then
     say "$name $ver is already installed"; return 0
+  fi
+  if [ -n "$cur" ] && [ -z "$FORCE" ] && have=$(app_updated_itself "$name" "$ver"); then
+    say "$name: the app has already updated itself to $have ${D}(--force reinstalls $ver)$N"; return 0
   fi
 
   for dep in $(jlist "$f" depends); do
@@ -661,8 +736,9 @@ EOF
 
   mkdir -p "$dir/.spork"
   cp "$f" "$dir/.spork/manifest.json"
-  printf 'drawer=%s\nsource=%s\narch=%s\ninstalled=%s\n' \
-    "$drawer" "$source" "$M_ARCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dir/.spork/info"
+  printf 'drawer=%s\nsource=%s\narch=%s\ninstalled=%s\napp_version=%s\n' \
+    "$drawer" "$source" "$M_ARCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(app_version_style "$name" "$ver")" > "$dir/.spork/info"
 
   run_hook "$f" post_install "$dir"
 
@@ -922,7 +998,7 @@ cmd_uninstall() {
 }
 
 cmd_update() {
-  local name cur new failed=0 all=
+  local name cur new have failed=0 all=
   if [ $# -eq 0 ]; then
     self_update
     say "Updating drawers"
@@ -938,6 +1014,9 @@ cmd_update() {
     if [ "$new" = "$cur" ] && [ -z "$FORCE" ]; then
       [ -z "$all" ] && say "$name $cur is up to date"; continue
     fi
+    if [ -z "$FORCE" ] && have=$(app_updated_itself "$name" "$new"); then
+      [ -z "$all" ] && say "$name is up to date: the app has already updated itself to $have"; continue
+    fi
     ( do_install "$(source_of "$name")" ) || failed=1
   done
   [ -n "$all" ] && [ $failed -eq 0 ] && say "Everything is up to date"
@@ -948,7 +1027,7 @@ cmd_status() {
   local name cur new outdated=0
   for name in $(installed_list); do
     cur=$(installed_version "$name"); new=$(latest_version "$name")
-    if [ -n "$new" ] && [ "$new" != "$cur" ]; then
+    if [ -n "$new" ] && [ "$new" != "$cur" ] && ! app_updated_itself "$name" "$new" >/dev/null; then
       [ $outdated -eq 0 ] && say "Updates available:"
       printf '    %-24s %s -> %s%s\n' "$name" "$cur" "$G$new$N" "$([ -f "$APPS_DIR/$name/.hold" ] && echo " (held)")"
       outdated=$((outdated + 1))
@@ -958,10 +1037,13 @@ cmd_status() {
 }
 
 cmd_list() {
-  local name any=
+  local name any= cur have
   for name in $(installed_list); do
     [ -z "$any" ] && printf '%s%-24s %-16s %s%s\n' "$B" Name Version Drawer "$N" && any=1
-    printf '%-24s %-16s %s%s\n' "$name" "$(installed_version "$name")" "$(receipt "$name" drawer)" \
+    cur=$(installed_version "$name")
+    # Show the version an app updated itself to, rather than the one spork installed.
+    have=$(app_updated_itself "$name" "$cur") && [ "$have" != "$cur" ] && cur=$have
+    printf '%-24s %-16s %s%s\n' "$name" "$cur" "$(receipt "$name" drawer)" \
       "$([ -f "$APPS_DIR/$name/.hold" ] && echo " (held)")"
   done
   [ -n "$any" ] || say "Nothing installed yet. Try: spork search"
