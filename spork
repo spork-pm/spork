@@ -675,6 +675,43 @@ $(jlist "$f" "$k")
 EOF
 }
 
+# ---------------------------------------------------------------- environment variables
+
+# Print "NAME<TAB>value" for each "env_set" entry, with $dir (through "current")
+# and $persist_dir filled in. Like resolve_paths, run it in the current shell
+# when a bad entry should stop the install.
+resolve_env() {
+  local name=$1 f=$2 k v val
+  k=$(mkey "$f" env_set) || return 0
+  [ "$(jtype "$f" "$k")" = dictionary ] || die "env_set must be an object of NAME: \"value\""
+  # plutil can't list keys, but its XML output has one <key> per line.
+  while IFS= read -r v; do
+    case $v in
+      PATH) die "env_set can't set PATH; use env_add_path" ;;
+      [A-Za-z_]*) case $v in *[!A-Za-z0-9_]*) die "env_set name '$v' must be letters, digits and _" ;; esac ;;
+      *) die "env_set name '$v' must be letters, digits and _" ;;
+    esac
+    [ "$(jtype "$f" "$k.$v")" = string ] || die "env_set $v must be a string"
+    val=$(jget "$f" "$k.$v")
+    case $val in *$'\n'*|*$'\t'*) die "env_set $v can't contain tabs or newlines" ;; esac
+    val=${val//\$persist_dir/"$PERSIST_DIR/$name"}
+    val=${val//\$dir/"$APPS_DIR/$name/current"}
+    printf '%s\t%s\n' "$v" "$val"
+  done <<EOF
+$(plutil -extract "$k" xml1 -o - "$f" | sed -n 's|^	<key>\(.*\)</key>$|\1|p')
+EOF
+}
+
+# Quote a value for the shell that will read "spork shellenv".
+shell_quote() {
+  local q="'" bs='\' s=$1
+  case ${SHELL##*/} in
+    fish) s=${s//"$bs"/$bs$bs}; s=${s//"$q"/$bs$q} ;;
+    *)    s=${s//"$q"/$q$bs$q$q} ;;
+  esac
+  printf "'%s'" "$s"
+}
+
 # ---------------------------------------------------------------- install / uninstall
 
 do_install() {
@@ -707,6 +744,7 @@ do_install() {
 $(persist_entries "$f")
 EOF
   resolve_paths "$name" "$f" >/dev/null
+  resolve_env "$name" "$f" >/dev/null
   if [ -n "$cur" ]; then say "Updating $name $cur -> $ver ${D}[$drawer]$N"
   else say "Installing $name $ver ${D}[$drawer, $M_ARCH]$N"; fi
 
@@ -752,6 +790,8 @@ EOF
   link_bins "$name" "$f"
   resolve_paths "$name" "$f" > "$pkgdir/.spork-paths"
   [ -s "$pkgdir/.spork-paths" ] || rm -f "$pkgdir/.spork-paths"
+  resolve_env "$name" "$f" > "$pkgdir/.spork-env"
+  [ -s "$pkgdir/.spork-env" ] || rm -f "$pkgdir/.spork-env"
 
   mkdir -p "$dir/.spork"
   cp "$f" "$dir/.spork/manifest.json"
@@ -767,14 +807,26 @@ EOF
   done
 
   say "${B}$name $ver$N installed"
+  local missing=
   if [ -f "$pkgdir/.spork-paths" ]; then
-    local p missing=
+    local p
     while IFS= read -r p; do
       note "adds $p to PATH"
       case ":$PATH:" in *":$p:"*) ;; *) missing=1 ;; esac
     done < "$pkgdir/.spork-paths"
-    [ -n "$missing" ] && note "open a new terminal, or run: eval \"\$(spork shellenv)\""
   fi
+  if [ -f "$pkgdir/.spork-env" ]; then
+    local v val other
+    while IFS=$'\t' read -r v val; do
+      note "sets $v=$val"
+      [ "$(printenv "$v")" = "$val" ] || missing=1
+      for other in $(installed_list); do
+        [ "$other" != "$name" ] && grep -q "^$v	" "$APPS_DIR/$other/.spork-env" 2>/dev/null &&
+          warn "$other also sets $v; the package that comes last alphabetically wins"
+      done
+    done < "$pkgdir/.spork-env"
+  fi
+  [ -n "$missing" ] && note "open a new terminal, or run: eval \"\$(spork shellenv)\""
   local notes; notes=$(k=$(mkey "$f" notes) && jlist "$f" "$k")
   [ -n "$notes" ] && printf '%sNotes:%s\n%s\n' "$C" "$N" "$(printf '%s\n' "$notes" | sed 's/^/    /')"
   return 0
@@ -805,6 +857,8 @@ do_uninstall() {
     while IFS= read -r a; do [ -n "$a" ] && rm -f "$a"; done < "$pkgdir/.spork-fonts"
     note "removed $(grep -c . "$pkgdir/.spork-fonts") font(s) from $SPORK_FONTDIR"
   fi
+  [ -f "$pkgdir/.spork-env" ] &&
+    note "unsets $(cut -f1 "$pkgdir/.spork-env" | paste -sd' ' -) in new terminals"
   rm -rf "$pkgdir"
   if [ -d "$PERSIST_DIR/$name" ]; then
     if [ -n "$PURGE" ]; then rm -rf "$PERSIST_DIR/$name"; note "deleted saved data in $PERSIST_DIR/$name"
@@ -1290,9 +1344,9 @@ cmd_which() {
 }
 
 # PATH gets $BIN_DIR first, then the folders installed packages asked for
-# with "env_add_path".
+# with "env_add_path". Then come the variables from "env_set".
 cmd_shellenv() {
-  local dirs=$BIN_DIR name p
+  local dirs=$BIN_DIR name p v val
   for name in $(installed_list); do
     [ -f "$APPS_DIR/$name/.spork-paths" ] || continue
     while IFS= read -r p; do
@@ -1303,6 +1357,16 @@ cmd_shellenv() {
     fish) echo "fish_add_path -g $(printf '%s\n' "$dirs" | tr ':' '\n' | sed 's/.*/"&"/' | tr '\n' ' ')" ;;
     *)    echo "export PATH=\"$dirs:\$PATH\"" ;;
   esac
+  for name in $(installed_list); do
+    [ -f "$APPS_DIR/$name/.spork-env" ] || continue
+    while IFS=$'\t' read -r v val; do
+      [ -n "$v" ] || continue
+      case ${SHELL##*/} in
+        fish) echo "set -gx $v $(shell_quote "$val")" ;;
+        *)    echo "export $v=$(shell_quote "$val")" ;;
+      esac
+    done < "$APPS_DIR/$name/.spork-env"
+  done
 }
 
 path_hint() {
@@ -1364,7 +1428,7 @@ ${B}Usage:${N} spork <command> [options] [args]
   mirror add <from> <to> | rm <from> | list | test <url>
                         Rewrite download URLs to go through a proxy or mirror
   hash <file|url>       Print a sha256 for writing manifests
-  shellenv              Print the line that adds spork to PATH
+  shellenv              Print the lines that set up PATH and package variables
   doctor                Check your setup
 
 ${B}Options:${N} -f, --force   reinstall, or replace files spork doesn't own
