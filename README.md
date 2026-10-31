@@ -236,6 +236,8 @@ With that rule, `https://github.com/jqlang/jq/releases/…` is downloaded from
 - Drawers downloaded without git come from `codeload.github.com`, so mirror that host too.
 - If the replacement must contain the whole original URL, put it in the rule, e.g.
   `spork mirror add https://github.com/ https://proxy.example.com/fetch/https://github.com/`.
+- [docs/hosts.md](docs/hosts.md) lists the hosts each official package downloads from, to help
+  you pick rules or open a firewall.
 
 ### Mirrors that need a login
 
