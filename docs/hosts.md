@@ -46,23 +46,3 @@ Mirror rules match the URL in the manifest, before any redirect. A rule for
 `release-assets.githubusercontent.com` itself, so your machine never contacts that host. Add one
 rule per host in the first column that your network blocks, plus `https://codeload.github.com/`
 if you install without git.
-
-## Hosts for drawer maintainers
-
-The [auto-update tools](../tools/README.md) need two more kinds of access: `checkver` reads the
-latest version from a host, and `autoupdate` downloads the new version from the hosts above to
-compute its hash.
-
-| Host | Checked for |
-|---|---|
-| `api.github.com` | Every GitHub package above, plus docker and helm (`"checkver": {"github": …}`) |
-| `nodejs.org` | nodejs, nodejs-lts |
-| `builds.dotnet.microsoft.com` | dotnet10-sdk |
-| `dl.k8s.io` | kubectl |
-| `releases.hashicorp.com` | terraform |
-| `data.services.jetbrains.com` | intellij, rider |
-| `update.code.visualstudio.com` | vscode |
-| `product-details.mozilla.org` | firefox |
-| `coconut-flavour.com` | coconut-battery |
-
-The GitHub Actions workflows run on GitHub's own runners, which can reach all of these.
