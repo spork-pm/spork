@@ -354,7 +354,7 @@ netgit() { git -c http.proxyAuthMethod=negotiate "$@"; }
 # ---------------------------------------------------------------- download, verify, extract
 
 fetch() {
-  local url=$1 out=$2 progress=-sS real
+  local url=$1 out=$2 progress=-sS real final
   if [ -f "$out" ]; then note "using cached $(basename "$out")"; return 0; fi
   real=$(mirror_url "$url")
   say "Downloading $url"
@@ -362,10 +362,29 @@ fetch() {
     if mirror_creds "$(url_host "$real")"; then note "via mirror $real (as $CRED_USER)"
     else note "via mirror $real"; fi
   fi
-  [ -t 2 ] && progress=--progress-bar
-  mcurl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$url" \
-    || { rm -f "$out.part"; die "download failed: $real"; }
+  if [ -t 2 ]; then
+    progress=--progress-bar
+    final=$(final_url "$url")
+  fi
+  # curl draws a new progress bar for each redirect, so when the download is
+  # redirected to another host, fetch it from there directly. A mirror login
+  # stays with the mirror: curl wouldn't send it to another host either.
+  if [ -n "$final" ] && [ "$(url_host "$final")" != "$(url_host "$real")" ]; then
+    curl --proxy-negotiate -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$final"
+  else
+    mcurl -fL $progress --retry 3 --connect-timeout 20 -o "$out.part" "$url"
+  fi || { rm -f "$out.part"; die "download failed: $real"; }
   mv "$out.part" "$out"
+}
+
+# Where a URL ends up after redirects, found by asking for its first byte only.
+# --max-filesize stops a server that ignores the byte range from sending the
+# whole file; curl still reports the URL it got to.
+final_url() {
+  local u
+  u=$(mcurl -sL -r 0-0 --max-filesize 65536 --connect-timeout 20 -o /dev/null \
+    -w '%{url_effective}' "$1" 2>/dev/null)
+  case $u in http://*|https://*) echo "$u" ;; esac
 }
 
 # Hashes are "sha256:<hex>", "sha512:<hex>", "sha1:<hex>" or bare hex (sha256).
