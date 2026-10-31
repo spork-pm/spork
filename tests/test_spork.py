@@ -688,6 +688,43 @@ class SporkTest(unittest.TestCase):
                 self.spork("install", "pathy", ok=False)
                 self.assertIsNone(self.installed("pathy"))
 
+    # ------------------------------------------------------------ environment variables
+
+    def test_env_set_and_shellenv(self):
+        self.publish_tool("envy", "1.0", env_set={
+            "ENVY_HOME": "$dir/share", "ENVY_DATA": "$persist_dir/data", "ENVY_MSG": "it's $HOME \\ ok"})
+        out = self.spork("install", "envy").stdout
+        self.assertIn("sets ENVY_HOME=", out)
+        self.assertIn("spork shellenv", out)
+        # Evaluate the output in a real shell to check the quoting.
+        shellenv = self.spork("shellenv", env={"SHELL": "/bin/bash"}).stdout
+        got = subprocess.run(["/bin/bash", "-c", shellenv + 'printf "%s\\n" "$ENVY_HOME" "$ENVY_DATA" "$ENVY_MSG"'],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(got, [f"{self.spork_home}/apps/envy/current/share",
+                               f"{self.spork_home}/persist/envy/data", "it's $HOME \\ ok"])
+        fish = self.spork("shellenv", env={"SHELL": "/opt/fish"}).stdout
+        self.assertIn("set -gx ENVY_MSG 'it\\'s $HOME \\\\ ok'", fish)
+        self.assertIn("unsets", self.spork("uninstall", "envy").stdout)
+        self.assertNotIn("ENVY", self.spork("shellenv").stdout)
+
+    def test_env_set_conflict_warns(self):
+        self.publish_tool("one", "1.0", env_set={"SHARED": "a"})
+        self.publish_tool("two", "1.0", env_set={"SHARED": "b"})
+        self.spork("install", "one")
+        self.assertIn("one also sets SHARED", self.spork("install", "two").stderr)
+        self.assertTrue(self.spork("shellenv").stdout.endswith("export SHARED='b'\n"))
+
+    def test_bad_env_set_rejected_before_download(self):
+        for env, msg in [({"PATH": "x"}, "env_add_path"), ({"1BAD": "x"}, "letters"),
+                         ({"A-B": "x"}, "letters"), ({"OK": 1}, "string"),
+                         ({"OK": "a\tb"}, "tabs"), (["OK"], "object")]:
+            with self.subTest(env=env):
+                self.manifest("bad", version="1.0", url=f"{self.base_url}/never-served.tar.gz", env_set=env)
+                err = self.spork("install", "bad", ok=False).stderr
+                self.assertIn(msg, err)
+                self.assertNotIn("download failed", err)
+                self.assertIsNone(self.installed("bad"))
+
     # ------------------------------------------------------------ mirrors and cache
 
     def test_mirror_rules(self):

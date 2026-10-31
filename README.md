@@ -140,6 +140,7 @@ manifests up to date.
     "depends": ["bar"],
     "persist": ["data", ["conf/settings.ini", "settings.ini"]],
     "env_add_path": ["tools", "$persist_dir/data/bin"],
+    "env_set": {"FOO_HOME": "$dir", "FOO_CONFIG": "$persist_dir/conf"},
     "pre_install": "…shell…",
     "post_install": ["…shell…", "…"],
     "pre_uninstall": "…shell…",
@@ -159,6 +160,7 @@ manifests up to date.
 | `depends` | Packages to install first. |
 | `persist` | Files or folders inside the package that hold user data: `"path"`, or a list of `"path"` / `["path", "name"]`. See [Persisted data](#persisted-data). |
 | `env_add_path` | Extra folders to put on `PATH`, for tools that install their own commands. See [Extra PATH folders](#extra-path-folders). |
+| `env_set` | Environment variables to set, as `{"NAME": "value"}`. See [Environment variables](#environment-variables). |
 | hooks | Shell run from the package folder, with `$dir`, `$version`, `$appdir`, `$fontdir`, `$bindir`, `$arch` and `$persist_dir` (the package's [persisted data](#persisted-data) folder) set. |
 
 Supported downloads: `.zip`, `.tar`/`.tar.gz`/`.tgz`/`.tar.xz`/`.tar.bz2`/`.tar.zst`, `.dmg`
@@ -209,6 +211,24 @@ land in under `env_add_path`:
 - `spork shellenv` puts these folders on `PATH` after `~/.spork/bin`. The shell picks them up when
   it starts, so after installing such a package, open a new terminal or run
   `eval "$(spork shellenv)"`. Uninstalling the package removes them the same way.
+
+## Environment variables
+
+Some tools need a variable that points at their files, like `JAVA_HOME`. Set them with `env_set`:
+
+```json
+"env_set": {"FOO_HOME": "$dir", "FOO_CONFIG": "$persist_dir/conf"}
+```
+
+- `$dir` is the package folder, through `current`, so the value stays right after updates.
+  `$persist_dir` is the package's [persisted data](#persisted-data) folder. Everything else is
+  used as-is: `$HOME` stays `$HOME`.
+- Names use letters, digits and `_`. `PATH` isn't allowed; use [`env_add_path`](#extra-path-folders).
+- `spork shellenv` exports the variables after setting `PATH`. Like `env_add_path`, they take effect
+  in new terminals, or after `eval "$(spork shellenv)"`. Uninstalling the package removes them the
+  same way.
+- If two packages set the same variable, spork warns, and the package that comes last
+  alphabetically wins.
 
 ## Mirrors and proxies
 
