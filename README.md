@@ -59,6 +59,19 @@ Run `spork help` for the full list (`info`, `cat`, `home`, `prefix`, `which`, `c
 `mirror`, …).
 `-f`/`--force` reinstalls, or lets spork replace an app or command it doesn't own.
 
+### Apps that update themselves
+
+Many apps keep themselves up to date. Before updating one, spork reads the version the app
+reports (`CFBundleShortVersionString` in its `Info.plist`). If the app is already at the drawer's
+version or newer, spork skips the download and leaves the app alone: `spork status` doesn't list
+it, and `spork list` shows the app's own version. Once the drawer has a newer version than the
+app, spork updates it as usual. `spork update --force <pkg>` reinstalls the drawer's version anyway.
+
+spork only trusts an app's version when, at install time, it matched the manifest's `version`,
+either as is (`2.0.4`) or followed by the app's build number (`CFBundleVersion`) without its
+leading letters (`2026.2.4-262.11879.100` for `IU-262.11879.100`). Other apps are always updated
+from the drawer. Apps installed before this check existed start using it at their next update.
+
 ## Layout
 
 ```

@@ -453,7 +453,10 @@ class SporkTest(unittest.TestCase):
 
     # ------------------------------------------------------------ apps
 
-    def make_app_zip(self, version):
+    def make_app_zip(self, version, short=None, build=None):
+        """Foo.app, optionally reporting CFBundleShortVersionString `short` and CFBundleVersion `build`."""
+        keys = "".join(f"<key>{k}</key><string>{v}</string>" for k, v in
+                       [("CFBundleShortVersionString", short), ("CFBundleVersion", build)] if v)
         src = self.tree(f"app-{version}", {
             "Foo.app/Contents/MacOS/Foo": f'#!/bin/sh\necho "Foo {version}"\n',
             "Foo.app/Contents/Info.plist": (
@@ -461,16 +464,23 @@ class SporkTest(unittest.TestCase):
                 '<plist version="1.0"><dict>'
                 '<key>CFBundleExecutable</key><string>Foo</string>'
                 '<key>CFBundleIdentifier</key><string>test.spork.foo</string>'
-                '</dict></plist>\n'),
+                f'{keys}</dict></plist>\n'),
         })
         out = self.build / f"foo-{version}.zip"
         subprocess.run(["ditto", "-c", "-k", "--keepParent", src / "Foo.app", out], check=True)
         return out
 
-    def publish_app(self, version):
-        url, digest = self.serve(self.make_app_zip(version))
+    def publish_app(self, version, short=None, build=None):
+        url, digest = self.serve(self.make_app_zip(version, short, build))
         return self.manifest("foo", version=version, url=url, hash=digest, app="Foo.app",
                              bin=[["Foo.app/Contents/MacOS/Foo", "foo"]])
+
+    def app_updates_itself(self, short, build=None):
+        """Pretend the installed Foo.app updated itself: only its Info.plist changes."""
+        plist = str(self.appdir / "Foo.app/Contents/Info.plist")
+        for key, value in [("CFBundleShortVersionString", short), ("CFBundleVersion", build)]:
+            if value:
+                subprocess.run(["plutil", "-replace", key, "-string", value, plist], check=True)
 
     def test_app_install_update_uninstall(self):
         self.publish_app("1.0")
@@ -487,6 +497,52 @@ class SporkTest(unittest.TestCase):
         self.spork("uninstall", "foo")
         self.assertFalse(app.exists())
         self.assertFalse((self.spork_home / "bin/foo").exists())
+
+    def test_app_that_updated_itself_is_not_downloaded_again(self):
+        self.publish_app("1.0", short="1.0")
+        self.spork("install", "foo")
+        self.assertEqual(self.receipt("foo")["app_version"], "short")
+
+        self.app_updates_itself("2.1")
+        self.publish_app("2.0", short="2.0")
+        self.assertIn("Everything is up to date", self.spork("status").stdout)
+        self.assertIn("already updated itself to 2.1", self.spork("update", "foo").stdout)
+        self.assertIn("already updated itself to 2.1", self.spork("install", "foo").stdout)
+        self.assertIn("Everything is up to date", self.spork("update", "--all").stdout)
+        self.assertEqual(self.installed("foo"), "1.0")
+        self.assertEqual(self.run_cmd("foo"), "Foo 1.0")        # the app wasn't replaced
+        self.assertRegex(self.spork("list").stdout, r"foo\s+2\.1\s")
+
+        self.publish_app("3.0", short="3.0")                    # the drawer is newer again
+        self.assertRegex(self.spork("status").stdout, r"foo\s+1\.0 -> 3\.0")
+        self.spork("update", "foo")
+        self.assertEqual(self.installed("foo"), "3.0")
+        self.assertEqual(self.run_cmd("foo"), "Foo 3.0")
+
+        self.app_updates_itself("3.1")
+        self.publish_app("3.1", short="3.1")
+        self.spork("update", "--force", "foo")
+        self.assertEqual(self.run_cmd("foo"), "Foo 3.1")
+
+    def test_app_version_with_build_number(self):
+        # Like IntelliJ: manifest 2026.2.4-262.11879.100, app 2026.2.4 (IU-262.11879.100).
+        self.publish_app("4.4.0-265", short="4.4.0", build="IU-265")
+        self.spork("install", "foo")
+        self.assertEqual(self.receipt("foo")["app_version"], "build")
+        self.app_updates_itself("4.4.1", "IU-270")
+        self.publish_app("4.4.1-270", short="4.4.1", build="IU-270")
+        self.assertIn("already updated itself to 4.4.1-270", self.spork("update", "foo").stdout)
+        self.publish_app("4.4.1-271", short="4.4.1", build="IU-271")
+        self.spork("update", "foo")
+        self.assertEqual(self.installed("foo"), "4.4.1-271")
+
+    def test_app_with_other_numbering_is_always_updated(self):
+        self.publish_app("1.0", short="17.0")
+        self.spork("install", "foo")
+        self.assertEqual(self.receipt("foo")["app_version"], "")
+        self.publish_app("2.0", short="17.0")
+        self.spork("update", "foo")
+        self.assertEqual(self.installed("foo"), "2.0")
 
     def test_unowned_app_needs_force(self):
         (self.appdir / "Foo.app").mkdir(parents=True)
