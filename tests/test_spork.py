@@ -28,8 +28,23 @@ PROXY_VARS = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_pro
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    """Serves files, and /redirect/<name> as a redirect to <name> on another host
+    (localhost instead of 127.0.0.1). Records each request as "<path> <Range header>"."""
+    requests = []
+
     def log_message(self, *args):
         pass
+
+    def do_GET(self):
+        self.requests.append(f"{self.path} {self.headers.get('Range')}")
+        if self.path.startswith("/redirect/"):
+            self.send_response(302)
+            self.send_header("Location", f"http://localhost:{self.server.server_address[1]}/"
+                                         + self.path[len("/redirect/"):])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_GET()
 
 
 def sha256(path):
@@ -51,7 +66,9 @@ class SporkTest(unittest.TestCase):
         for d in (self.home, self.drawer, self.www, self.build):
             d.mkdir()
 
-        handler = functools.partial(QuietHandler, directory=str(self.www))
+        self.requests = []
+        handler = functools.partial(type("Handler", (QuietHandler,), {"requests": self.requests}),
+                                    directory=str(self.www))
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -711,6 +728,32 @@ class SporkTest(unittest.TestCase):
         out = self.spork("install", "hello").output
         self.assertIn(f"via mirror {self.base_url}/hello-1.0.tar.gz", out)
         self.assertEqual(self.run_cmd("hello"), "hello 1.0")
+
+    def test_redirect_to_other_host_is_downloaded_directly(self):
+        # In a terminal, curl draws a new progress bar for each redirect. So spork
+        # first finds where the URL leads (asking for one byte), then downloads
+        # from there in a single transfer.
+        url, digest = self.serve(self.tool_archive("hello", "1.0"))
+        self.manifest("hello", version="1.0", url=f"{self.base_url}/redirect/hello-1.0.tar.gz",
+                      hash=digest, extract_dir="hello-1.0", bin="bin/hello")
+        self.requests.clear()
+        # script(1) gives spork a terminal, so it shows a progress bar.
+        p = subprocess.run(["script", "-q", "/dev/null", str(SPORK), "install", "hello"],
+                           env=self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.run_cmd("hello"), "hello 1.0")
+        self.assertEqual(self.requests, [
+            "/redirect/hello-1.0.tar.gz bytes=0-0",   # finding where it leads
+            "/hello-1.0.tar.gz bytes=0-0",
+            "/hello-1.0.tar.gz None",                 # the download, straight from there
+        ])
+
+        self.spork("uninstall", "hello")             # without a terminal: one plain transfer
+        self.spork("cache", "rm", "hello")
+        self.requests.clear()
+        self.spork("install", "hello")
+        self.assertEqual(self.requests, ["/redirect/hello-1.0.tar.gz None", "/hello-1.0.tar.gz None"])
 
     def test_cache(self):
         self.publish_tool("hello", "1.0")
