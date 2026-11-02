@@ -5,10 +5,19 @@
 #   ./install.sh --link           use this folder as spork itself (for working on
 #                                 spork); spork won't update itself
 #
+# It also works on its own, without a copy of the repo:
+#   curl -fsSL https://raw.githubusercontent.com/spork-pm/spork/main/install.sh | bash
+#   curl -fsSL …/install.sh | bash -s -- --no-modify-path
+#
 # spork is fetched from $SPORK_REPO (default: the official repo) into
-# $SPORK_HOME/self, so "spork update" can update it later.
+# $SPORK_HOME/self, so "spork update" can update it later. $SPORK_REPO can also
+# be a .tar.gz URL, e.g. an internal mirror of the repo's archive.
+
+# Everything is in a function, so that when this script is piped into bash, bash
+# reads all of it before running anything (git or curl could read the rest of the
+# script from stdin otherwise).
+main() {
 set -e
-here=$(cd "$(dirname "$0")" && pwd)
 SPORK_HOME=${SPORK_HOME:-$HOME/.spork}
 SPORK_REPO=${SPORK_REPO:-https://github.com/spork-pm/spork}
 export SPORK_HOME SPORK_REPO
@@ -22,11 +31,24 @@ for a in "$@"; do
   esac
 done
 
+# The folder this script is in, if it's a copy of the repo (has spork next to it).
+# Piped into bash, the script has no file, so there's no copy to fall back on.
+here=
+if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [ -f "$here/spork" ] || here=
+fi
+
 self=$SPORK_HOME/self
 mkdir -p "$SPORK_HOME/bin" "$SPORK_HOME/drawers" "$HOME/Applications"
 if [ -n "$link" ]; then
+  [ -n "$here" ] || { echo "--link needs a copy of the spork repo: run ./install.sh --link from it" >&2; exit 1; }
   [ "$here" -ef "$self" ] && { echo "--link needs a spork folder outside $self" >&2; exit 1; }
   rm -rf "$self"; ln -s "$here" "$self"
+elif [ -z "$here" ]; then
+  download_self "$SPORK_HOME/self.new" \
+    || { rm -rf "$SPORK_HOME/self.new"; echo "Couldn't download spork from $SPORK_REPO" >&2; exit 1; }
+  rm -rf "$self"; mv "$SPORK_HOME/self.new" "$self"
 elif ! "$here/spork" _self-install; then
   # Install this copy. Its .spork-source lets "spork update" try again later.
   echo "Couldn't fetch spork from $SPORK_REPO; installing the copy in $here instead."
@@ -50,7 +72,7 @@ for name in main apps; do
     continue
   fi
   rm -rf "$d"
-  "$SPORK_HOME/bin/spork" drawer add "$name" \
+  "$SPORK_HOME/bin/spork" drawer add "$name" </dev/null \
     || echo "Couldn't add the '$name' drawer. Check that you can reach its URL, then run: spork drawer add $name"
 done
 
@@ -70,3 +92,39 @@ else
   echo "Add this line to your shell startup file to put spork on PATH:"
   echo "    $line"
 fi
+}
+
+has_git() {
+  local g; g=$(command -v git) || return 1
+  # /usr/bin/git is only a stub until the Command Line Tools are installed.
+  [ "$g" != /usr/bin/git ] || xcode-select -p >/dev/null 2>&1
+}
+
+# Download spork from $SPORK_REPO into $1, as "spork _self-install" would: a git
+# clone, or else an archive with a .spork-source file so "spork update" works.
+download_self() {
+  local dest=$1 url p
+  rm -rf "$dest"
+  case $SPORK_REPO in
+    *.tar.gz|*.tgz) url=$SPORK_REPO ;;
+    *)
+      if has_git; then
+        git -c http.proxyAuthMethod=negotiate clone -q --depth 1 "$SPORK_REPO" "$dest" </dev/null || return 1
+      else
+        case $SPORK_REPO in
+          https://github.com/*)
+            p=${SPORK_REPO#https://github.com/}; p=${p%.git}; p=${p%/}
+            url=https://codeload.github.com/$p/tar.gz/HEAD ;;
+          *) echo "git isn't available and $SPORK_REPO isn't a GitHub or .tar.gz URL" >&2; return 1 ;;
+        esac
+      fi ;;
+  esac
+  if [ -n "$url" ]; then
+    mkdir -p "$dest"
+    curl --proxy-negotiate -fsSL "$url" </dev/null | tar -xzf - -C "$dest" --strip-components 1 || return 1
+    echo "$SPORK_REPO" > "$dest/.spork-source"
+  fi
+  [ -f "$dest/spork" ] && bash -n "$dest/spork" || { echo "the downloaded spork looks broken" >&2; return 1; }
+}
+
+main "$@"
