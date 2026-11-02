@@ -16,8 +16,11 @@ A [Scoop](https://scoop.sh)-style package manager for macOS that works without a
 ## Install
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/spork-pm/spork/main/install.sh | bash
 ```
+
+Or, from a copy of this repo, run `./install.sh`. To pass options to the piped installer, use
+`bash -s --`, e.g. `curl -fsSL …/install.sh | bash -s -- --no-modify-path`.
 
 This downloads spork into `~/.spork/self` (a git clone of this repo, or an archive if git is
 missing), adds the official `main` and `apps` drawers (see
@@ -27,10 +30,11 @@ missing), adds the official `main` and `apps` drawers (see
 eval "$(~/.spork/bin/spork shellenv)"
 ```
 
-Pass `--no-modify-path` to skip editing your shell file. If spork can't be downloaded, the
-installer uses its own copy instead. Set `SPORK_REPO` to install from a fork or an internal
-copy of the repo. If you're working on spork itself, `./install.sh --link` uses your checkout
-as-is.
+Pass `--no-modify-path` to skip editing your shell file. If spork can't be downloaded,
+`./install.sh` uses the copy next to it instead (piped into bash, there's no copy, so it stops
+with an error). Set `SPORK_REPO` to install from a fork or an internal copy of the repo, or from
+a `.tar.gz` of it (e.g. an internal mirror of GitHub's archive). If you're working on spork
+itself, `./install.sh --link` uses your checkout as-is.
 
 `spork update` keeps spork itself up to date: it updates `~/.spork/self` first, then carries on
 with the new version. Set `SPORK_NO_SELF_UPDATE=1` to turn this off. Linked installs

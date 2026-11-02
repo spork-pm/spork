@@ -991,6 +991,50 @@ class SporkTest(unittest.TestCase):
         self.assertFalse(old.exists())
         self.assertEqual(os.readlink(self.spork_home / "bin/spork"), str(self.spork_home / "self/spork"))
 
+    def piped_install(self, repo, *args):
+        """Run install.sh the way "curl … | bash" does: from stdin, outside a spork checkout."""
+        if not (self.spork_home / "drawers/apps").exists():   # keeps install.sh from cloning the real one
+            (self.home / "apps-drawer").mkdir(exist_ok=True)
+            self.spork("drawer", "add", "apps", str(self.home / "apps-drawer"))
+        p = subprocess.run(["/bin/bash", "-s", "--", "--no-modify-path", *args],
+                           input=(SPORK.parent / "install.sh").read_text(), cwd=self.build,
+                           env={**self.env, "SPORK_REPO": repo}, capture_output=True, text=True,
+                           timeout=120)
+        p.output = p.stdout + p.stderr
+        return p
+
+    def test_install_without_a_copy_of_the_repo(self):
+        repo = self.upstream()
+        p = self.piped_install(f"file://{repo}")
+        self.assertEqual(p.returncode, 0, p.output)
+        self.assertTrue((self.spork_home / "self/.git").is_dir())     # a git clone, so it can update
+        self.assertEqual(os.readlink(self.spork_home / "bin/spork"), str(self.spork_home / "self/spork"))
+        self.assertIn("spork 0.1.0", self.installed_spork("version").stdout)
+        self.assertIn("spork installed", p.stdout)                      # the script ran to the end
+
+        # From an archive, e.g. an internal mirror of the repo's tarball.
+        top = self.build / "spork-main"
+        top.mkdir()
+        shutil.copy(SPORK, top / "spork")
+        with tarfile.open(self.www / "spork.tar.gz", "w:gz") as t:
+            t.add(top, arcname="spork-main")
+        url = f"{self.base_url}/spork.tar.gz"
+        p = self.piped_install(url)
+        self.assertEqual(p.returncode, 0, p.output)
+        self_dir = self.spork_home / "self"
+        self.assertFalse((self_dir / ".git").exists())
+        self.assertEqual((self_dir / ".spork-source").read_text().strip(), url)
+        self.assertIn("spork 0.1.0", self.installed_spork("version").stdout)
+
+        # With no copy to fall back on, a failed download is an error, and --link has nothing to link.
+        p = self.piped_install("file:///nonexistent")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Couldn't download spork", p.output)
+        self.assertIn("spork 0.1.0", self.installed_spork("version").stdout)  # the old install is kept
+        p = self.piped_install(f"file://{repo}", "--link")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--link needs a copy of the spork repo", p.output)
+
     # ------------------------------------------------------------ doctor
 
     def test_doctor(self):
