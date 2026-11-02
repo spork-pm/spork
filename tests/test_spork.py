@@ -993,8 +993,9 @@ class SporkTest(unittest.TestCase):
 
     def piped_install(self, repo, *args):
         """Run install.sh the way "curl … | bash" does: from stdin, outside a spork checkout."""
-        (self.home / "apps-drawer").mkdir(exist_ok=True)
-        self.spork("drawer", "add", "apps", str(self.home / "apps-drawer"))
+        if not (self.spork_home / "drawers/apps").exists():   # keeps install.sh from cloning the real one
+            (self.home / "apps-drawer").mkdir(exist_ok=True)
+            self.spork("drawer", "add", "apps", str(self.home / "apps-drawer"))
         p = subprocess.run(["/bin/bash", "-s", "--", "--no-modify-path", *args],
                            input=(SPORK.parent / "install.sh").read_text(), cwd=self.build,
                            env={**self.env, "SPORK_REPO": repo}, capture_output=True, text=True,
