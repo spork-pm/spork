@@ -50,12 +50,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out the drawer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           token: ${{ secrets.token || github.token }}
 
       - name: Check out spork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.spork-repository }}
           ref: ${{ inputs.spork-ref }}
