@@ -9,7 +9,7 @@ jobs:
   checkver:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [macos-latest, macos-15-intel]   # Apple silicon and Intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check syntax
         run: bash -n spork && bash -n install.sh
       - name: End-to-end tests

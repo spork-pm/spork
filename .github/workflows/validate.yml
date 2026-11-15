@@ -46,13 +46,13 @@ jobs:
       packages: ${{ steps.pick.outputs.packages }}
     steps:
       - name: Check out the drawer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0  # to diff against the pull request's base
           persist-credentials: false
 
       - name: Check out spork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.spork-repository }}
           ref: ${{ inputs.spork-ref }}
@@ -95,12 +95,12 @@ jobs:
       contents: read
     steps:
       - name: Check out the drawer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Check out spork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.spork-repository }}
           ref: ${{ inputs.spork-ref }}
